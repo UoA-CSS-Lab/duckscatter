@@ -7,7 +7,7 @@
 
 > duckscatterは大規模な散布図を描画するための、TypeScriptライブラリです。
 
-従来の散布図描画ライブラリでは、全文検索などの複雑なフィルタリングに時間がかかりました。duckscatterは、DuckDB-WASMによるSQL内での高速なデータ処理と、WebGPUによる大規模並列レンダリングを組み合わせることで、数十万点規模のデータでもスムーズな操作を実現します。
+duckscatterは、DuckDB-WASMによるSQLでのデータ処理と、WebGPUによる並列レンダリングを組み合わせます。座標計算済みの数十万〜数百万点の探索を主な対象とし、複雑な条件による絞り込みと、数値範囲を頻繁に変える操作を支えます。性能の対応範囲は、データと端末を揃えた実測で確認します。
 
 * **WebGPUによるレンダリング:** GPUの能力を活用し、ブラウザ上で大規模な散布図を高速に描画します。CanvasやSVGでは扱えきれないような大量のデータポイントであっても、スムーズな操作を実現します。
 
@@ -18,6 +18,51 @@
 ## 画面イメージ
 
 <img src="./docs/image.png" alt="screen image" width="600">
+
+## 最小の利用例
+
+点の描画には WebGPU が利用できるブラウザ環境が必要です。DuckDB-WASM の初期化では jsDelivr から Worker / WASM を取得します。
+
+現行の依存宣言では DuckDB-WASM の明示的なインストールも必要です。
+
+```bash
+npm install @uoa-css-lab/duckscatter "@duckdb/duckdb-wasm@^1.30.0"
+```
+
+```html
+<canvas id="scatterplot" width="800" height="600"></canvas>
+```
+
+バンドラーを使う TypeScript アプリから初期化します。
+
+```typescript
+import { ScatterPlot } from '@uoa-css-lab/duckscatter';
+
+const canvas = document.querySelector<HTMLCanvasElement>('#scatterplot');
+if (!canvas) throw new Error('描画先の canvas がありません');
+
+const plot = new ScatterPlot({
+  canvas,
+  dataUrl: '/points.parquet',
+  data: {},
+});
+
+// 現行の initialize() は失敗をイベントで通知するため、呼び出す前に購読します。
+let initializationFailed = false;
+plot.on('error', (error) => {
+  console.error(error);
+  if (error.severity !== 'warning') initializationFailed = true;
+});
+
+await plot.initialize();
+if (initializationFailed) {
+  await plot.destroy();
+  throw new Error('散布図の初期化に失敗しました');
+}
+plot.render();
+```
+
+`/points.parquet` には `x` / `y` を持つデータを配置してください。ローカルファイルを扱う場合は `dataUrl` の代わりに `dataFile: file`（`File` / `ArrayBuffer`）を指定できます。
 
 ## データについて
 
@@ -31,6 +76,8 @@ duckscatterは、Parquet形式のデータファイルを読み込みます。�
 | `y` | double | Y座標 |
 
 その他のカラムはSQLで参照でき、色やサイズの計算に利用できます。
+
+初期化後は行集合と座標を固定し、差し替え時は散布図を作り直します。数値の前提、GPU フィルターの float32 精度、現状の検証不足は [データ契約](./docs/data-contract.md) を参照してください。
 
 ### GeoJSONファイル（ラベル用）
 
@@ -56,12 +103,14 @@ duckscatterは、Parquet形式のデータファイルを読み込みます。�
 
 ## API
 
+以下は設定項目を示す型の擬似コードです。実行可能な初期化例は「最小の利用例」を参照してください。
+
 ```typescript
 const plot = new ScatterPlot({
   canvas: HTMLCanvasElement,  // 描画先のcanvas要素
   dataUrl: string,            // ParquetファイルのURL
   data: {
-    visiblePointLimit?: number,               // 描画最大ポイント数（デフォルト: 100,000）
+    visiblePointLimit?: number,               // LOD の描画予算（デフォルト: 5,000,000、厳密な上限ではない）
     sizeSql?: string,                         // サイズ計算SQL式（デフォルト: "3"）
     colorSql?: string,                        // 色計算SQL式（ARGB 32bit整数、デフォルト: "0x4D4D4DCC"）
     whereConditions?: WhereCondition[],       // フィルタ条件（CPU側）
@@ -371,6 +420,10 @@ cd examples/react
 export OPENAI_API_KEY="your-api-key"
 python scripts/generate_labels.py
 ```
+
+## 開発者向けドキュメント
+
+設計や変更時の前提は [ドキュメント一覧](./docs/README.md) を参照してください。[用語集](./CONTEXT.md)、[現行アーキテクチャ](./docs/architecture.md)、設計判断を記録した ADR をまとめています。
 
 ## ライセンス
 
