@@ -1,5 +1,7 @@
 node_modules/
 dist/
+*.tsbuildinfo
+.env*
 *.log
 .DS_Store
 .vscode/
@@ -8,3 +10,5 @@ dist/
 *.swo
 *.parquet
 *.geojson
+!examples/react/public/output.parquet
+!examples/react/public/label.geojson

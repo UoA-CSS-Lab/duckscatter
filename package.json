@@ -14,7 +14,7 @@
     "test": "true",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
-    "lint:examples": "npm run lint --prefix examples/next",
+    "lint:examples": "npm run lint --prefix examples/react",
     "lint:all": "npm run lint && npm run lint:examples",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,json,md}\""

@@ -336,6 +336,8 @@ interface RawSqlFilter {
 
 ## Examples
 
+Vite + React + TypeScript を使ったサンプルアプリです。
+
 ### 実行方法
 
 ```bash
@@ -344,12 +346,15 @@ npm install
 npm run build
 
 # サンプルアプリの実行
-cd examples/next
+cd examples/react
 npm install
 npm run dev
 ```
 
 ブラウザで http://localhost:3000 を開きます。
+
+本番用の静的ファイルは `examples/react` で `npm run build` を実行すると `dist/` に生成されます。
+`npm run preview` でビルド結果をローカル確認できます。
 
 ### サンプルデータ
 
@@ -362,7 +367,7 @@ npm run dev
 ラベルはDBSCANクラスタリングとOpenAI APIを使って生成できます:
 
 ```bash
-cd examples/next
+cd examples/react
 export OPENAI_API_KEY="your-api-key"
 python scripts/generate_labels.py
 ```

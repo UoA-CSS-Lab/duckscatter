@@ -10,12 +10,10 @@ services:
       - ..:/workspace:cached
       - node_modules:/workspace/node_modules
       - dist:/workspace/dist
-      - next_node_modules:/workspace/examples/next/node_modules
-      - next_dot_next:/workspace/examples/next/.next
+      - react_node_modules:/workspace/examples/react/node_modules
     working_dir: /workspace
 
 volumes:
   node_modules:
   dist:
-  next_node_modules:
-  next_dot_next:
+  react_node_modules:
