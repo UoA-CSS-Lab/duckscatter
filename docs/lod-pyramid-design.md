@@ -274,7 +274,7 @@ per-tile dispatch（3b）は構造的に**可視タイル外の foreground 点�
 ## 11. publish フロー / Web UI 取り込み
 
 duckscatter（`E:/duckscatter`）:
-1. PR を `development` 向け → `ci.yaml`（build＋`scripts/check-package-files.mjs` の dist 同梱ガード＋lint＋test）通過。
+1. PR を `development` 向け → `ci.yaml`（build＋`.github/scripts/check-package-files.mjs` の dist 同梱ガード＋lint＋test）通過。
 2. merge 後 `release.yml` を `workflow_dispatch`（patch/minor/major）→ `npm version` が bump＋`v*` タグ push。
 3. タグ push で `publish` job（`if startsWith(github.ref,'refs/tags/')`）が npm/GitHub Packages へ publish。
 4. versioning: Phase 2/3/4（opt-in・挙動不変 or 追加）= **minor**、Phase 5（PCG 撤去・破壊的）= **major**。

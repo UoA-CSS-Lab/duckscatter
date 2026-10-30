@@ -53,7 +53,7 @@ module.exports = tseslint.config(
       'node_modules/**',
       'dist/**',
       'build/**',
-      'scripts/**',
+      '.github/scripts/**',
       '*.js',
       '*.d.ts',
       '*.config.js',
@@ -67,7 +67,7 @@ module.exports = tseslint.config(
       '*.log',
       'temp/**',
       'tmp/**',
-      'examples/next/**',
+      'examples/**',
     ],
   }
 );

@@ -5,6 +5,18 @@
 
 version: 2
 updates:
+  - package-ecosystem: "docker"
+    directory: "/.devcontainer"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 50
+    labels:
+      - "dependencies"
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -30,7 +42,7 @@ updates:
           - "*"
 
   - package-ecosystem: "npm"
-    directory: "/examples/next"
+    directory: "/examples/react"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 50
