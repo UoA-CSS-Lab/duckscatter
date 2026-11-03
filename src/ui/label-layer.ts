@@ -9,6 +9,8 @@ import type {
 } from '../types.js';
 import type { DataLayer } from '../data/data-layer.js';
 import { getPointColor, getPointSize } from '../util/point.js';
+import { expandLabelBounds, LabelCollisionIndex } from './label-collision.js';
+import type { LabelBounds } from './label-collision.js';
 
 /** 描画するラベルの既定の最大数（クラスタサイズ順 上位 N 件）。俯瞰時の描画負荷の上限。 */
 const DEFAULT_MAX_RENDERED_LABELS = 150;
@@ -23,7 +25,7 @@ export interface LabelLayerOptions {
   minLabelDistance?: number;
   /** ラベルのフォントサイズ（ピクセル） */
   labelFontSize?: number;
-  /** ラベルのフィルタリング関数 */
+  /** ラベルのフィルター。更新時の null は解除、undefined は据え置き。 */
   filterLambda?: LabelFilterLambda | null;
   /**
    * filterLambda が false を返した「非マッチ」ラベルの不透明度（0-1）。指定すると非マッチ
@@ -84,10 +86,10 @@ export class LabelLayer {
   private mutedLabelStyle?: MutedLabelStyle;
   /** 描画するラベルの最大数（クラスタサイズ順 上位 N 件） */
   private maxRenderedLabels: number = DEFAULT_MAX_RENDERED_LABELS;
-  /** ラベル幅キャッシュ（テキスト→基準フォントサイズでの幅）。measureText の毎フレーム呼び出しを回避 */
-  private textWidthCache = new Map<string, number>();
-  /** textWidthCache を計測したフォントサイズ（変わったらクリア） */
-  private twCacheFontSize = -1;
+  /** 実際のフォントごとの文字矩形キャッシュ。太字・ホバー拡大も分けて計測する。 */
+  private textBoundsCache = new Map<string, Map<string, LabelBounds>>();
+  /** textBoundsCache を計測したフォントサイズ（変わったらクリア） */
+  private textBoundsFontSize = -1;
   /** 直近 render() の入力スナップショット。すべて一致なら再描画を省く（冗長 render の抑止） */
   private rPrev = {
     zoom: NaN,
@@ -282,10 +284,10 @@ export class LabelLayer {
       return;
     }
 
-    // ラベル幅キャッシュはフォントサイズが変わったら破棄（幅は px に比例するので基準サイズ分のみ保持）。
-    if (this.twCacheFontSize !== this.labelFontSize) {
-      this.textWidthCache.clear();
-      this.twCacheFontSize = this.labelFontSize;
+    // サイズ変更時は古いフォントの計測値を破棄し、キャッシュの際限ない増加を防ぐ。
+    if (this.textBoundsFontSize !== this.labelFontSize) {
+      this.textBoundsCache.clear();
+      this.textBoundsFontSize = this.labelFontSize;
     }
 
     const fontSize = this.labelFontSize;
@@ -301,7 +303,11 @@ export class LabelLayer {
     this.labelContext.textAlign = 'center';
     this.labelContext.textBaseline = 'middle';
 
-    const renderedPositions: Array<{ x: number; y: number }> = [];
+    const collisionIndex = new LabelCollisionIndex(
+      this.labelCanvas.width,
+      this.labelCanvas.height,
+      this.minLabelDistance * (fontSize / 12)
+    );
 
     const labelsWithFilter = this.labels.map((label) => ({
       label,
@@ -325,7 +331,7 @@ export class LabelLayer {
     for (const { label, passedFilter, isMuted } of labelsWithFilter) {
       // 描画本数の上限。this.labels は loadLabels で count 降順に pre-sort 済みで、上の sort は
       // passedFilter での分類のみ（安定ソートで元順序=count 降順を保持）。よって上位 N 件が残る。
-      if (renderedPositions.length >= this.maxRenderedLabels) break;
+      if (this.renderedLabelBounds.length >= this.maxRenderedLabels) break;
       const { x: screenX, y: screenY } = this.worldToScreenCoords(label.x, label.y);
 
       if (
@@ -334,130 +340,162 @@ export class LabelLayer {
         screenY >= 0 &&
         screenY <= this.labelCanvas.height
       ) {
-        const effectiveMinDistance = this.minLabelDistance * (this.labelFontSize / 12);
-        const tooClose = renderedPositions.some((pos) => {
-          const dx = pos.x - screenX;
-          const dy = pos.y - screenY;
-          const distance = Math.sqrt(dx * dx + dy * dy);
-          return distance < effectiveMinDistance;
-        });
+        const isHovered = this.hoveredLabel === label;
+        const scale = isHovered ? this.hoverScale : this.normalScale;
+        const scaledFontSize = fontSize * scale;
+        const bold = !isMuted || this.mutedLabelStyle?.bold === true;
+        // 衝突で描画しなかった候補から、次の候補へ影の設定を引き継がない。
+        this.labelContext.shadowColor = 'transparent';
+        this.labelContext.shadowBlur = 0;
+        this.labelContext.shadowOffsetX = 0;
+        this.labelContext.shadowOffsetY = 0;
 
-        if (!tooClose) {
-          const isHovered = this.hoveredLabel === label;
-          const scale = isHovered ? this.hoverScale : this.normalScale;
-          const scaledFontSize = fontSize * scale;
-
-          this.labelContext.font = `bold ${scaledFontSize}px sans-serif`;
-
-          // measureText は高コスト。テキストは不変なので基準フォントサイズでの幅を一度だけ計測して
-          // キャッシュし、scale で補正する（幅は px サイズに比例）。毎フレームの全ラベル計測を回避。
-          let baseWidth = this.textWidthCache.get(label.text);
-          if (baseWidth === undefined) {
-            this.labelContext.font = `bold ${fontSize}px sans-serif`;
-            baseWidth = this.labelContext.measureText(label.text).width;
-            this.labelContext.font = `bold ${scaledFontSize}px sans-serif`;
-            this.textWidthCache.set(label.text, baseWidth);
-          }
-          const textWidth = baseWidth * scale;
-          const textHeight = scaledFontSize;
-
-          if (isMuted) {
-            // muted（内容フィルタ非該当）= 最優先で「沈める」。元の「白抜き＋色縁＋影＋bold」を
-            // そのまま流用すると目立つため、ドロップシャドウは常に付けない。塗り/縁取り/bold は
-            // mutedLabelStyle で決める（未指定は flat: 非 bold・mutedLabelColor のグレー塗り・縁取り無し）。
-            // 選択 dim 中（!passedFilter）は従来の薄さ（unmatchedLabelOpacity）以下に抑え、浮かせない。
-            const a = passedFilter
-              ? this.mutedLabelOpacity
-              : Math.min(
-                  this.mutedLabelOpacity,
-                  this.unmatchedLabelOpacity ?? this.mutedLabelOpacity
-                );
-            const style = this.mutedLabelStyle;
-            const [fr, fg, fb] = style?.fillColor ?? this.mutedLabelColor;
-            const stroke = style?.strokeColor ?? null;
-            this.labelContext.font = `${style?.bold ? 'bold ' : ''}${scaledFontSize}px sans-serif`;
-            this.labelContext.shadowColor = 'transparent';
-            this.labelContext.shadowBlur = 0;
-            this.labelContext.shadowOffsetX = 0;
-            this.labelContext.shadowOffsetY = 0;
-            this.labelContext.fillStyle = `rgba(${fr}, ${fg}, ${fb}, ${a})`;
-            if (stroke) {
-              const [sr, sg, sb] = stroke;
-              this.labelContext.strokeStyle = `rgba(${sr}, ${sg}, ${sb}, ${a})`;
-              this.labelContext.lineWidth = style?.strokeWidth ?? 2;
-            } else {
-              this.labelContext.strokeStyle = 'transparent';
-              this.labelContext.lineWidth = 0;
-            }
-          } else if (passedFilter) {
-            this.labelContext.shadowColor = 'rgba(0, 0, 0, 0.4)';
-            this.labelContext.shadowBlur = 6;
-            this.labelContext.shadowOffsetX = 2;
-            this.labelContext.shadowOffsetY = 2;
-
-            this.labelContext.fillStyle = 'white';
-
-            if (
-              label.properties?.color &&
-              Array.isArray(label.properties.color) &&
-              label.properties.color.length === 3
-            ) {
-              const [r, g, b] = label.properties.color;
-              this.labelContext.strokeStyle = `rgb(${r}, ${g}, ${b})`;
-            } else {
-              this.labelContext.strokeStyle = 'white';
-            }
-            this.labelContext.lineWidth = 2;
-          } else if (this.unmatchedLabelOpacity !== undefined) {
-            // dim-only: グレー化や非表示ではなく opacity だけ下げる（ノードの dim-only 選択と
-            // 視覚を揃える）。色を持つラベルは元のクラスタ色を保持し、color 配列を持たない
-            // 標準ラベル（cluster_label/cluster/count のみ）でも要求 opacity
-            // を尊重する（中立グレーを同じ opacity で適用）。
-            const a = this.unmatchedLabelOpacity;
-            const col = label.properties?.color;
-            const hasColor = Array.isArray(col) && col.length === 3;
-            this.labelContext.shadowColor = 'transparent';
-            this.labelContext.shadowBlur = 0;
-            this.labelContext.fillStyle = `rgba(255, 255, 255, ${a})`;
-            this.labelContext.strokeStyle = hasColor
-              ? `rgba(${col[0]}, ${col[1]}, ${col[2]}, ${a})`
-              : `rgba(100, 100, 100, ${a})`;
-            this.labelContext.lineWidth = 2;
+        if (isMuted) {
+          // muted（内容フィルタ非該当）= 最優先で「沈める」。元の「白抜き＋色縁＋影＋bold」を
+          // そのまま流用すると目立つため、ドロップシャドウは常に付けない。塗り/縁取り/bold は
+          // mutedLabelStyle で決める（未指定は flat: 非 bold・mutedLabelColor のグレー塗り・縁取り無し）。
+          // 選択 dim 中（!passedFilter）は従来の薄さ（unmatchedLabelOpacity）以下に抑え、浮かせない。
+          const a = passedFilter
+            ? this.mutedLabelOpacity
+            : Math.min(
+                this.mutedLabelOpacity,
+                this.unmatchedLabelOpacity ?? this.mutedLabelOpacity
+              );
+          const style = this.mutedLabelStyle;
+          const [fr, fg, fb] = style?.fillColor ?? this.mutedLabelColor;
+          const stroke = style?.strokeColor ?? null;
+          this.labelContext.fillStyle = `rgba(${fr}, ${fg}, ${fb}, ${a})`;
+          if (stroke) {
+            const [sr, sg, sb] = stroke;
+            this.labelContext.strokeStyle = `rgba(${sr}, ${sg}, ${sb}, ${a})`;
+            this.labelContext.lineWidth = style?.strokeWidth ?? 2;
           } else {
-            this.labelContext.shadowColor = 'rgba(0, 0, 0, 0.3)';
-            this.labelContext.shadowBlur = 4;
-            this.labelContext.shadowOffsetX = 2;
-            this.labelContext.shadowOffsetY = 2;
-
-            this.labelContext.fillStyle = 'rgba(180, 180, 180, 0.6)';
-            this.labelContext.strokeStyle = 'rgba(100, 100, 100, 0.6)';
-            this.labelContext.lineWidth = 1.5;
+            this.labelContext.strokeStyle = 'transparent';
+            this.labelContext.lineWidth = 0;
           }
+        } else if (passedFilter) {
+          this.labelContext.shadowColor = 'rgba(0, 0, 0, 0.4)';
+          this.labelContext.shadowBlur = 6;
+          this.labelContext.shadowOffsetX = 2;
+          this.labelContext.shadowOffsetY = 2;
 
-          if (this.labelContext.lineWidth > 0) {
-            this.labelContext.strokeText(label.text, screenX, screenY);
+          this.labelContext.fillStyle = 'white';
+
+          if (
+            label.properties?.color &&
+            Array.isArray(label.properties.color) &&
+            label.properties.color.length === 3
+          ) {
+            const [r, g, b] = label.properties.color;
+            this.labelContext.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+          } else {
+            this.labelContext.strokeStyle = 'white';
           }
-          this.labelContext.fillText(label.text, screenX, screenY);
-
+          this.labelContext.lineWidth = 2;
+        } else if (this.unmatchedLabelOpacity !== undefined) {
+          // dim-only: グレー化や非表示ではなく opacity だけ下げる（ノードの dim-only 選択と
+          // 視覚を揃える）。色を持つラベルは元のクラスタ色を保持し、color 配列を持たない
+          // 標準ラベル（cluster_label/cluster/count のみ）でも要求 opacity
+          // を尊重する（中立グレーを同じ opacity で適用）。
+          const a = this.unmatchedLabelOpacity;
+          const col = label.properties?.color;
+          const hasColor = Array.isArray(col) && col.length === 3;
           this.labelContext.shadowColor = 'transparent';
           this.labelContext.shadowBlur = 0;
-          this.labelContext.shadowOffsetX = 0;
-          this.labelContext.shadowOffsetY = 0;
+          this.labelContext.fillStyle = `rgba(255, 255, 255, ${a})`;
+          this.labelContext.strokeStyle = hasColor
+            ? `rgba(${col[0]}, ${col[1]}, ${col[2]}, ${a})`
+            : `rgba(100, 100, 100, ${a})`;
+          this.labelContext.lineWidth = 2;
+        } else {
+          this.labelContext.shadowColor = 'rgba(0, 0, 0, 0.3)';
+          this.labelContext.shadowBlur = 4;
+          this.labelContext.shadowOffsetX = 2;
+          this.labelContext.shadowOffsetY = 2;
 
-          this.renderedLabelBounds.push({
-            label,
-            x: screenX - textWidth / 2,
-            y: screenY - textHeight / 2,
-            width: textWidth,
-            height: textHeight,
-          });
-
-          renderedPositions.push({ x: screenX, y: screenY });
+          this.labelContext.fillStyle = 'rgba(180, 180, 180, 0.6)';
+          this.labelContext.strokeStyle = 'rgba(100, 100, 100, 0.6)';
+          this.labelContext.lineWidth = 1.5;
         }
+
+        // 通常時にもホバー時の最大サイズを予約し、拡大で他のラベルへ重なったり、
+        // ホバーした途端に自身が衝突判定で消えたりすることを防ぐ。
+        const normalBounds = this.measureLabelBounds(label.text, fontSize * this.normalScale, bold);
+        const hoverBounds = this.measureLabelBounds(label.text, fontSize * this.hoverScale, bold);
+        const textBounds = isHovered ? hoverBounds : normalBounds;
+        // フォントの丸めで通常サイズの一部が拡大サイズからはみ出す場合も、両方を包含する。
+        const left = Math.min(hoverBounds.x, normalBounds.x);
+        const top = Math.min(hoverBounds.y, normalBounds.y);
+        const right = Math.max(
+          hoverBounds.x + hoverBounds.width,
+          normalBounds.x + normalBounds.width
+        );
+        const bottom = Math.max(
+          hoverBounds.y + hoverBounds.height,
+          normalBounds.y + normalBounds.height
+        );
+        const collisionBounds = expandLabelBounds(
+          {
+            x: screenX + left,
+            y: screenY + top,
+            width: right - left,
+            height: bottom - top,
+          },
+          {
+            strokeWidth: this.labelContext.lineWidth,
+            miterLimit: this.labelContext.lineJoin === 'miter' ? this.labelContext.miterLimit : 1,
+            shadowBlur: this.labelContext.shadowBlur,
+            shadowOffsetX: this.labelContext.shadowOffsetX,
+            shadowOffsetY: this.labelContext.shadowOffsetY,
+          }
+        );
+        if (!collisionIndex.tryInsert(collisionBounds, screenX, screenY)) continue;
+
+        this.labelContext.font = `${bold ? 'bold ' : ''}${scaledFontSize}px sans-serif`;
+        if (this.labelContext.lineWidth > 0) {
+          this.labelContext.strokeText(label.text, screenX, screenY);
+        }
+        this.labelContext.fillText(label.text, screenX, screenY);
+
+        this.renderedLabelBounds.push({
+          label,
+          x: screenX + textBounds.x,
+          y: screenY + textBounds.y,
+          width: textBounds.width,
+          height: textBounds.height,
+        });
       }
     }
 
+    // 最後の候補が衝突で除外されても、影をポイントのアウトラインへ引き継がない。
+    this.labelContext.shadowColor = 'transparent';
+    this.labelContext.shadowBlur = 0;
+    this.labelContext.shadowOffsetX = 0;
+    this.labelContext.shadowOffsetY = 0;
     this.renderPointOutline();
+  }
+
+  /** 中央揃えの描画原点から見た文字矩形を、実際のフォントで計測して再利用する。 */
+  private measureLabelBounds(text: string, fontSize: number, bold: boolean): LabelBounds {
+    const font = `${bold ? 'bold ' : ''}${fontSize}px sans-serif`;
+    let cache = this.textBoundsCache.get(font);
+    if (!cache) {
+      cache = new Map();
+      this.textBoundsCache.set(font, cache);
+    }
+    let bounds = cache.get(text);
+    if (!bounds) {
+      this.labelContext.font = font;
+      const metrics = this.labelContext.measureText(text);
+      // advance 幅だけでなく、左右へのはみ出し・アクセント・ディセンダーも含める。
+      const left = Math.max(metrics.width / 2, metrics.actualBoundingBoxLeft);
+      const right = Math.max(metrics.width / 2, metrics.actualBoundingBoxRight);
+      const top = Math.max(fontSize / 2, metrics.actualBoundingBoxAscent);
+      const bottom = Math.max(fontSize / 2, metrics.actualBoundingBoxDescent);
+      bounds = { x: -left, y: -top, width: left + right, height: top + bottom };
+      cache.set(text, bounds);
+    }
+    return bounds;
   }
 
   /**
