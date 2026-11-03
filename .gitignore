@@ -12,3 +12,5 @@ dist/
 *.geojson
 !examples/react/public/abcnews-embeddinggemma2-umap.parquet
 !examples/react/public/abcnews-clusters.geojson
+# 一時的な検証スクリプトをサンプルに含めない。
+examples/react/scripts/
