@@ -1,0 +1,118 @@
+@startuml
+title
+<size:28><b>duckscatter</b></size>
+<size:16>入力データから散布図まで</size>
+<size:12>共通の点 ID　DuckDB の連続した rowid（0 ～ N−1）＝ CPU・GPU の配列添字</size>
+end title
+
+skinparam backgroundColor #F7F9FC
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontColor #17273C
+skinparam defaultFontSize 13
+skinparam ArrowColor #71839A
+skinparam ArrowFontColor #344861
+skinparam ArrowFontSize 11
+skinparam nodesep 24
+skinparam ranksep 24
+skinparam linetype polyline
+
+' 矩形の分割と点の位置で、四分木に格納する情報を示す。
+sprite quadtree <svg viewBox="0 0 44 44">
+  <path fill="#FFFFFF" stroke="#12776F" stroke-width="2" d="M2 2H42V42H2Z M22 2V42 M2 22H42 M12 2V22 M2 12H22"/>
+  <circle fill="#12776F" cx="7" cy="7" r="2"/>
+  <circle fill="#12776F" cx="17" cy="17" r="2"/>
+  <circle fill="#12776F" cx="31" cy="12" r="3"/>
+  <circle fill="#12776F" cx="12" cy="32" r="3"/>
+  <circle fill="#12776F" cx="34" cy="34" r="3"/>
+</svg>
+
+' 描画済みのラベル矩形をセルに登録する処理の模式図。
+sprite labelgrid <svg viewBox="0 0 64 40">
+  <path fill="#FFFFFF" stroke="#E5B375" d="M1 1H63V39H1Z M21 1V39 M42 1V39 M1 13H63 M1 26H63"/>
+  <path fill="#D37A25" d="M6 6H33V14H6Z M27 22H57V30H27Z"/>
+</svg>
+
+' 描画対象の点と、上に重ねる注釈の模式図。
+sprite scatter <svg viewBox="0 0 170 47">
+  <path fill="#FFFFFF" stroke="#BDD0E5" d="M1 1H169V46H1Z"/>
+  <circle fill="#2164C4" cx="22" cy="26" r="3"/>
+  <circle fill="#2164C4" cx="33" cy="34" r="2"/>
+  <circle fill="#2164C4" cx="43" cy="26" r="2"/>
+  <circle fill="#2164C4" cx="53" cy="31" r="3"/>
+  <circle fill="#2164C4" cx="62" cy="20" r="2"/>
+  <circle fill="#A9B3C3" cx="76" cy="36" r="3"/>
+  <circle fill="#A9B3C3" cx="93" cy="25" r="2"/>
+  <circle fill="#7548C2" cx="108" cy="24" r="3"/>
+  <circle fill="#7548C2" cx="122" cy="17" r="2"/>
+  <circle fill="#7548C2" cx="131" cy="26" r="3"/>
+  <circle fill="#7548C2" cx="143" cy="20" r="2"/>
+  <path fill="#D37A25" d="M28 10H57V15H28Z M117 5H145V10H117Z"/>
+</svg>
+
+' ParquetReader は入力を DuckDB-WASM に展開する。
+file "<b>Parquet</b>\n計算済みの x・y ＋ 任意の属性" as parquet #FFFFFF
+file "<b>GeoJSON</b>\n注釈の位置 ＋ properties" as geojson #FFFFFF
+
+database "<size:15><b>01　DuckDB-WASM</b></size>\n<b>parquet_data</b>　全行・全列\n|= ABC News の列 |= 型 |\n| publish_date | INTEGER |\n| headline_text | VARCHAR |\n| x | FLOAT |\n| y | FLOAT |\n| cluster_id | INTEGER |\n<size:11>必須は数値の x・y。通常の列型に自動 min-max 索引</size>" as point_table #E8F2FF
+database "<b>cluster_color</b>　React の一時表\n|= 列 |= 型 |\n| cluster_id | BIGINT 主キー |\n| color | INTEGER（ARGB） |\n<size:11>主キーに自動 ART 索引</size>" as palette #E8F2FF
+database "<b>label_data</b>　位置と全属性\n|= ABC News の列 |= 推論された型 |\n| x | DOUBLE |\n| y | DOUBLE |\n| cluster | BIGINT |\n| cluster_id | BIGINT |\n| cluster_label | VARCHAR |\n| cluster_label_50 | VARCHAR |\n| cluster_description | VARCHAR |\n| title | VARCHAR |\n| summary | VARCHAR |\n| color | BIGINT[] |\n| count | BIGINT |" as label_table #E8F2FF
+
+' 点本体・数値列は rowid 順。WHERE の結果は同じ添字のマスクに変換する。
+storage "<size:15><b>02　GPU 常駐バッファ</b></size>\n|= 点 ID ごとの要素 |= 型・形式 |= 点あたり |\n| x | f32 | 4 B |\n| y | f32 | 4 B |\n| color | u32（ARGB） | 4 B |\n| size | f32 | 4 B |\n| 数値フィルター | f32 × 4 | 16 B |\n| SQL 一致 | ビット列 | 1 bit |\n| 選択 | ビット列 | 1 bit |\n| ホバー強調 | ビット列 | 1 bit |\n<size:11>x から size までを 16 B の構造体に格納</size>" as gpu_data #E8F2FF
+collections "<b>CPU　間引きの閾値を計算</b>\nサイズ順の f32 と累積件数を保持\nGPU 計測時間と目標から保持率を調整\n俯瞰時のサイズ境界を二分探索" as sampling_threshold #E5F6F1
+collections "<$quadtree{scale=0.65}>  <b>CPU　ホバー用四分木</b>\nx・y 配列、節の矩形、葉の点 ID を保持\n矩形で枝刈り → SQL・数値条件を満たす最近傍\nホバー先が変わると SQL で属性を取得" as hover #E5F6F1
+
+' フィルター結果が無効なフレームでのみ、全点に対して compute を起動する。
+rectangle "<size:15><b>03　GPU で描画点を判定</b></size>\n<b>全 N 点を走査</b>（再判定が必要なとき）\n|= 判定 |= 条件 |\n| 描画点数の間引き | 俯瞰は大きい点を優先 |\n| 表示範囲 | 画面内の矩形 |\n| SQL フィルター | 一致マスク |\n| 数値フィルター | f32 の範囲 |\n<size:11>境界と同サイズの点やズームイン時は点 ID のハッシュで間引く</size>" as cull #EFE9FF
+collections "<b>描画用の点 ID 配列</b>\n|= 描画対象 |= 容量 |\n|<#E8F2FF> 一致点 | u32 × N |\n|<#EDF0F4> 不一致点（灰色表示時） | u32 × N |\nそれぞれの件数 → 間接描画のインスタンス数" as draw_ids #EFE9FF
+rectangle "<b>GPU　ブラシ選択</b>\n全点を矩形で判定。既定では条件一致も確認\n選択ビットを更新して件数を数える" as brush #EFE9FF
+
+' Canvas 2D は GeoJSON から直接注釈を準備する。
+collections "<$labelgrid{scale=0.65}>  <b>Canvas 2D　注釈</b>\n位置・文字・クラスタ・件数・全属性を保持\n64 px グリッドで文字矩形の衝突を判定\n描画した文字矩形をヒット判定に使う" as annotations #FFF0DC
+rectangle "<size:15><b>04　散布図</b></size>\n<$scatter>\n点の WebGPU キャンバスに注釈を重ねる" as plot #FFFFFF
+
+' 太線は点データの主経路。橙は注釈。点線は参照や描画時の補助入力。
+parquet -[#2464C4,thickness=3]down-> point_table : 全件を取り込み
+point_table -[#2464C4,thickness=3]down-> gpu_data : rowid 順の Arrow → 詰め替え\n色・サイズ式 / WHERE / 数値式
+gpu_data -[#2464C4,thickness=3]down-> cull
+cull -[#2464C4,thickness=3]down-> draw_ids
+draw_ids -[#2464C4,thickness=3]down-> plot : 点を間接描画
+
+point_table -[#12776F]down-> sampling_threshold : サイズ別に COUNT
+point_table -[#12776F]down-> hover : x・y
+sampling_threshold -[#12776F,dotted]down-> cull : 間引きの閾値
+hover -[#12776F,dotted]down-> annotations : 点のホバー輪郭
+
+geojson -[#B5641C]down-> label_table : URL・ファイル設定時
+geojson -[#B5641C]down-> palette : RGB → ARGB
+geojson -[#B5641C]down-> annotations : Feature から直接作成
+palette -[#2464C4,dotted]left-> point_table : 色式が cluster_id で参照
+annotations -[#B5641C]down-> plot : 文字と輪郭
+
+gpu_data -[#7548C2,dotted]down-> brush : 座標とフィルターを参照
+brush -[#7548C2,dotted]down-> plot : 選択に応じて色・サイズ・透過率を変更
+
+' 表と索引の横位置をそろえるための線。描画結果には現れない。
+palette -[hidden]right-> label_table
+sampling_threshold -[hidden]right-> gpu_data
+gpu_data -[hidden]right-> hover
+
+legend bottom
+  <color:#2464C4><b>青</b></color> 保存データ・点の主経路　 <color:#12776F><b>緑</b></color> CPU の索引　 <color:#7548C2><b>紫</b></color> GPU の判定・選択　 <color:#B5641C><b>橙</b></color> 注釈
+
+<b>操作ごとの更新（現行）</b>
+|= 操作 |= DuckDB での再取得 |= CPU・GPU での更新 |
+| 点の透明度を変更 | — | 描画設定を更新 → 全点判定 |
+| 点のサイズ倍率を変更 | — | 描画設定を更新 → 全点判定 |
+| 色の SQL 式を変更 | 点の属性と WHERE の一致ビットマップ | 点バッファと一致マスクを更新 → 全点判定 |
+| サイズの SQL 式を変更 | 点の属性、サイズ別件数、WHERE の一致ビットマップ | 累積件数、点バッファ、一致マスクを更新 → 全点判定 |
+| WHERE 条件を変更 | WHERE の一致ビットマップ | 一致マスクを更新 → 全点判定 |
+| GPU フィルター列を変更 | 指定した数値列 | 数値バッファを更新 → 全点判定 |
+| 数値フィルター範囲を変更 | — | 範囲を更新 → 全点判定 |
+| パン | — | 画面範囲を更新 → 全点判定 |
+| ズーム | — | 画面範囲と間引きの閾値を更新 → 全点判定 |
+| 目標描画時間を変更 | — | 計測履歴を更新 → 保持率を自動調整 |
+<size:11>WHERE の一致ビットマップ は条件を指定した場合に取得</size>
+endlegend
+@enduml
