@@ -19,6 +19,7 @@ import type {
   FrameStats,
 } from '../types.js';
 import { DEFAULT_VISIBLE_POINT_LIMIT } from '../constants.js';
+import { getLodSizeCutoff, type LodSizeDistribution } from '../data/lod.js';
 
 /** render uniform buffer サイズ（selection style + 受動クランプフィールドを含む, byte） */
 const RENDER_UNIFORM_SIZE = 192;
@@ -54,9 +55,8 @@ export interface AllPointsData {
   instanceData: Float32Array;
   /** 全ポイント数 */
   totalCount: number;
-  /** サイズ基準 LOD 優先度 [0,1)（0=最大サイズ, rowid 順）。サイズ降順＋rowid のランクを正規化したもの。
-   *  俯瞰時の間引きを「サイズの大きい点を優先的に残す（均一サイズなら rowid 順）」にするのに使う。 */
-  lodPriority?: Float32Array;
+  /** 俯瞰で大きい点を優先するためのサイズ別累積件数。CPU だけで保持し、GPU へは境界値を渡す。 */
+  lodSizeDistribution?: LodSizeDistribution;
 }
 
 /**
@@ -127,10 +127,8 @@ export class GpuLayer {
   private filterColumnsBuffer: GPUBuffer | null = null;
   /** WHERE条件による可視/非可視ビットマップバッファ */
   private visibilityFlagsBuffer: GPUBuffer | null = null;
-  /** サイズ基準 LOD 優先度バッファ（f32/point, [0,1)）。サイズの大きい点を優先的に残す間引き用 */
-  private lodPriorityBuffer: GPUBuffer | null = null;
-  /** lodPriority が投入済みでサイズ基準間引きを使えるか（未投入時は PCG ハッシュにフォールバック） */
-  private hasLodPriority = false;
+  /** サイズ境界の二分探索に使う累積件数。点数に比例する LOD 用 GPU バッファは作らない。 */
+  private lodSizeDistribution: LodSizeDistribution | undefined;
   /** GPU 常駐 selection bitset（1bit/point, brush で atomic 更新） */
   private selectionFlagsBuffer: GPUBuffer | null = null;
   /** selection bit 数（render の強調/減衰ゲート用, u32×1） */
@@ -514,13 +512,7 @@ export class GpuLayer {
     initialFlags.fill(0xffffffff);
     this.context.device.queue.writeBuffer(this.visibilityFlagsBuffer, 0, initialFlags);
 
-    // サイズ基準 LOD 優先度バッファ（shader が binding 8 で常に参照するので必ず作る。データは
-    // writeLodPriority で投入し、未投入なら hasLodPriority=false で PCG フォールバックになる）。
-    this.lodPriorityBuffer = this.context.device.createBuffer({
-      size: Math.max(4, data.totalCount * 4),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.writeLodPriority(data);
+    this.lodSizeDistribution = data.lodSizeDistribution;
 
     // selection 用バッファ（bitset + count + brush/count uniform）
     this.createSelectionBuffers(data.totalCount);
@@ -601,7 +593,6 @@ export class GpuLayer {
       !this.visibilityFlagsBuffer ||
       !this.filteredIndicesBuffer ||
       !this.filteredCounterBuffer ||
-      !this.lodPriorityBuffer ||
       !this.filteredIndirectBuffer ||
       !this.filteredRenderUniformBuffer ||
       !this.recededRenderUniformBuffer ||
@@ -627,7 +618,6 @@ export class GpuLayer {
         { binding: 5, resource: { buffer: this.visibilityFlagsBuffer } },
         { binding: 6, resource: { buffer: this.filteredIndicesBuffer } },
         { binding: 7, resource: { buffer: this.filteredCounterBuffer } },
-        { binding: 8, resource: { buffer: this.lodPriorityBuffer } },
       ],
     });
 
@@ -752,13 +742,6 @@ export class GpuLayer {
       initialFlags.fill(0xffffffff);
       this.context.device.queue.writeBuffer(this.visibilityFlagsBuffer, 0, initialFlags);
       this.whereFilterEnabled = false;
-
-      // サイズ基準 LOD 優先度バッファも作り直す（データは末尾の writeLodPriority で投入）。
-      this.lodPriorityBuffer?.destroy();
-      this.lodPriorityBuffer = this.context.device.createBuffer({
-        size: Math.max(4, newTotalCount * 4),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
     }
 
     if (countChanged) {
@@ -784,24 +767,9 @@ export class GpuLayer {
         data.instanceData.byteLength
       );
     }
-    this.writeLodPriority(data);
-  }
-
-  /** lodPriority データを GPU バッファへ投入する（無ければ hasLodPriority=false で PCG にフォールバック）。 */
-  private writeLodPriority(data: AllPointsData): void {
-    if (!this.context.device || !this.lodPriorityBuffer) return;
-    if (data.lodPriority && data.lodPriority.length >= data.totalCount && data.totalCount > 0) {
-      this.context.device.queue.writeBuffer(
-        this.lodPriorityBuffer,
-        0,
-        data.lodPriority.buffer,
-        data.lodPriority.byteOffset,
-        data.totalCount * 4
-      );
-      this.hasLodPriority = true;
-    } else {
-      this.hasLodPriority = false;
-    }
+    // 同じ点数のサイズ変更でも、新しい分布から境界を計算し直す。
+    this.lodSizeDistribution = data.lodSizeDistribution;
+    this.updateUniforms();
   }
 
   /**
@@ -1030,12 +998,17 @@ export class GpuLayer {
 
     // filteredDisplayMode: 0=hidden, 1=grayed
     computeUint32View[16] = this.filteredPointDisplayMode === 'grayed' ? 1 : 0;
-    // サイズ基準間引きは「データ全体が画面に入る俯瞰（zoom<=1=visibleAreaFraction>=1）」のときだけ使う。
-    // ズームインで一部領域だけ見ているときに大域サイズ順を適用すると、小サイズの密集領域が丸ごと
-    // 消える/大サイズ領域が予算超過する（局所被覆が壊れる）ため、その場合は従来の PCG ハッシュ
-    // （ビューポートを局所的に一様サンプル）にフォールバックする。
-    computeUint32View[17] = this.hasLodPriority && this.zoom <= 1.0 ? 1 : 0;
-    computeFloatView[18] = lodThreshold / 0xffffffff;
+    // 俯瞰ではサイズ境界を使う。均一サイズ・分布なし・ズームインでは従来のハッシュ間引き。
+    // 境界と同サイズの点に限って、残りの予算に応じたハッシュ閾値を適用する。
+    const cutoff = getLodSizeCutoff(
+      this.lodSizeDistribution,
+      this.totalPointCount,
+      lodThreshold,
+      this.zoom
+    );
+    computeUint32View[17] = cutoff ? 1 : 0;
+    computeFloatView[18] = cutoff?.size ?? 0;
+    computeUint32View[19] = cutoff?.tieHashThreshold ?? 0;
 
     this.context.device.queue.writeBuffer(this.computeUniformBuffer, 0, computeUniformData);
   }
@@ -1852,6 +1825,7 @@ export class GpuLayer {
     this.hoverFlagsBuffer?.destroy();
     this.brushUniformBuffer?.destroy();
     this.countUniformBuffer?.destroy();
+    this.lodSizeDistribution = undefined;
     this.context.destroy();
   }
 }
