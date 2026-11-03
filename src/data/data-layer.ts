@@ -1,7 +1,13 @@
 import type { AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
 import type { ParquetData, ParquetReader } from './repository.js';
 import { createParquetReader } from './repository.js';
-import type { WhereCondition, ScatterPlotError } from '../types.js';
+import type {
+  WhereCondition,
+  ScatterPlotError,
+  BrushBounds,
+  PointPosition,
+  PointAttributes,
+} from '../types.js';
 import { createError } from '../errors.js';
 import type { AllPointsData } from '../renderer/gpu-layer.js';
 import { SpatialPointIndex } from './spatial-index.js';
@@ -516,6 +522,19 @@ export class DataLayer {
     this.gpuFilterRanges = ranges;
   }
 
+  /** 固定座標と四分木を再利用し、LOD 前の矩形内一致点を取得する。 */
+  findPointsInBounds(bounds: BrushBounds, limit: number): PointPosition[] {
+    return this.spatialIndex
+      .findInBounds(
+        bounds,
+        limit,
+        this.visibilityFlags,
+        this.filterColumnData,
+        this.gpuFilterRanges
+      )
+      .map((id) => ({ id, x: this.pointsCache.xArr[id], y: this.pointsCache.yArr[id] }));
+  }
+
   /**
    * 画面座標に最も近いポイントを検索する
    * @param screenX マウスのスクリーンX座標
@@ -614,22 +633,39 @@ export class DataLayer {
    * @param pointId 検索するポイントのrowid
    * @returns 見つかった場合はポイントデータ、そうでない場合はnull
    */
-  async findPointById(pointId: number): Promise<Record<string, any> | null> {
-    const data = await this.repository!.query({
-      toString: () =>
-        `SELECT *, (${this.sizeSql}) AS __size__, (${this.colorSql}) AS __color__ FROM parquet_data WHERE rowid = ${pointId}`,
-    });
+  async findPointById(pointId: number): Promise<PointAttributes | null> {
+    return (await this.findPointsByIds([pointId]))[0] ?? null;
+  }
 
-    if (!data || data.rowCount === 0) {
-      return null;
+  /** 現在の色・サイズの式を使い、少数点の属性をひとつのクエリで取得する。 */
+  async findPointsByIds(pointIds: readonly number[]): Promise<PointAttributes[]> {
+    const ids = [...new Set(pointIds)];
+    if (ids.some((id) => !Number.isSafeInteger(id) || id < 0)) {
+      throw new RangeError('Point IDs must be non-negative safe integers.');
     }
-    const row: Record<string, any> = {};
-    for (let j = 0; j < data.columns.length; j++) {
-      const colName = data.columns[j];
-      const column = data.columnData.get(colName)!;
-      row[colName] = column.get(0);
+    if (ids.length === 0) return [];
+    if (!this.repository) throw new Error('Point data has not been initialized.');
+    const data = await this.repository.query({
+      toString: () =>
+        `SELECT *, (${this.sizeSql}) AS __size__, (${this.colorSql}) AS __color__, rowid AS __point_id__
+         FROM parquet_data WHERE rowid IN (${ids.join(',')})`,
+    });
+    const rows: PointAttributes[] = [];
+    for (let i = 0; i < data.rowCount; i++) {
+      const row: PointAttributes = {
+        __point_id__: Number(data.columnData.get('__point_id__')!.get(i)),
+        __size__: data.columnData.get('__size__')!.get(i),
+        __color__: data.columnData.get('__color__')!.get(i),
+      };
+      for (const column of data.columns) {
+        // 元データに同名の列があっても、描画用メタデータを上書きしない。
+        if (column !== '__point_id__' && column !== '__size__' && column !== '__color__') {
+          row[column] = data.columnData.get(column)!.get(i);
+        }
+      }
+      rows.push(row);
     }
-    return row;
+    return rows;
   }
 
   /**

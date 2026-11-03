@@ -155,8 +155,19 @@ await plot.initialize();
 * `update(options)`: オプション更新
 * `getLastUpdatePlan()`: 直近の `update()` が DuckDB / GPU / label のどの更新経路を通ったかを取得
 * `runQuery(sql)`: カスタムSQLクエリ実行
+* `getPointsInViewport(limit = 10)`: LOD 前の画面内一致点を上限付きで取得
+* `getPointsByIds(ids)`: 指定した点の元の属性と、現在のサイズ・色をまとめて取得
+* `getViewState()`: 座標を DOM へ投影するための表示状態を取得
 * `getLabels()`: ラベル全件取得
 * `destroy()`: リソース解放
+
+`getPointsInViewport()` は点の中心がキャンバス内にある SQL・GPU フィルター一致点を返します。結果は `{ points, limitExceeded, ready }` で、`points` の各要素は `{ id, x, y }`（データ空間の固定座標）です。上限超過時は `points` を空にし、上限 + 1 件で探索を打ち切ります。初期化前・点データやフィルターの更新中・破棄後は `ready: false` です。灰色の不一致点は含めず、LOD による間引き、点の半径や alpha は判定に影響しません。
+
+表示位置は `getViewState()` の `width` / `height`（物理ピクセル）、`zoom`、`panX` / `panY` から投影できます。`viewchange` はパン・ズーム・サイズ変更時、`pointdatachange` は点属性・フィルターの更新開始と完了時、`destroy` は破棄開始時に通知します。`pointdatachange.pending` が `false` になってから候補を再取得し、`attributesChanged` が `true` なら属性キャッシュを破棄します。任意の `runQuery()` では通知しないため、属性を書き換えた場合は `update({ data: { reloadPoints: true } })` を呼びます。
+
+HTML の生成・配置は利用側の責務です。[React example](examples/react/README.md) に、少数点へ見出し・日付を重ねる点カードの実装があります。ポイントホバーの取得属性には、同じ点カードとの対応に使える内部 ID `__point_id__` を含みます。
+
+`getPointsByIds()` は内部 ID の配列を受け取り、元の属性に `__point_id__`、現在の式で計算した `__size__`・`__color__` を加えた配列を返します。フィルターや LOD は適用せず、存在しない ID は結果に含めません。結果の順序は保証しないため、ID で対応付けます。空配列では問い合わせを行いません。
 
 **ポイント表示属性制御:**
 

@@ -28,6 +28,8 @@ import {
 const PUBLISH_TIME_SQL = "epoch(strptime(CAST(publish_date AS VARCHAR), '%Y%m%d'))";
 
 export const DEFAULT_LABEL_FONT_SIZE = 12;
+/** example の初期設定と、目標描画時間スライダーの表示を揃える。 */
+export const DEFAULT_EXAMPLE_TARGET_RENDER_TIME_MS = 100;
 
 interface ScatterPlotState {
   isInitialized: boolean;
@@ -41,6 +43,8 @@ interface ScatterPlotState {
   hasClusterColors: boolean;
   colorMode: PointColorMode;
   pointColor: string;
+  /** 画面内一致点がこの数以下なら点カードを表示する。0 で無効。 */
+  pointCardLimit: number;
   /** 読み込み済みラベルの表示用スナップショット */
   labels: Label[];
   /** 公開日の範囲（UNIX 秒の min/max） */
@@ -133,6 +137,8 @@ interface ScatterPlotContextValue {
   updatePointSizeScale: (scale: number) => void;
   /** ラベルのフォントサイズをピクセル単位で設定 */
   updateLabelFontSize: (fontSize: number) => Promise<void>;
+  /** HTML の点カードを表示する画面内一致点数の上限を設定する。 */
+  updatePointCardLimit: (limit: number) => void;
   /** フィルター除外ポイントの表示モードを設定 */
   updateFilteredPointDisplayMode: (mode: 'hidden' | 'grayed') => void;
   // ホバーの操作
@@ -162,6 +168,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     hasClusterColors: false,
     colorMode: 'cluster',
     pointColor: DEFAULT_POINT_COLOR,
+    pointCardLimit: 100,
     labels: [],
     timeRange: null,
   });
@@ -181,7 +188,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     colorSql: buildSingleColorSql(DEFAULT_POINT_COLOR),
     colorMode: 'cluster',
     pointColor: DEFAULT_POINT_COLOR,
-    targetRenderTimeMs: 8,
+    targetRenderTimeMs: DEFAULT_EXAMPLE_TARGET_RENDER_TIME_MS,
     labelFontSize: DEFAULT_LABEL_FONT_SIZE,
     timeRangeFilter: { min: null, max: null },
   });
@@ -459,6 +466,13 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     plotRef.current.setFilteredPointDisplayMode(mode);
   }, []);
 
+  const updatePointCardLimit = useCallback((limit: number) => {
+    if (!Number.isSafeInteger(limit) || limit < 0) return;
+    setState((previous) =>
+      previous.pointCardLimit === limit ? previous : { ...previous, pointCardLimit: limit }
+    );
+  }, []);
+
   // 一覧のデータ取得
   const fetchPoints = useCallback(
     async (page: number, pageSize: number): Promise<PointListItem[]> => {
@@ -521,6 +535,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
         updatePointAlpha,
         updatePointSizeScale,
         updateLabelFontSize,
+        updatePointCardLimit,
         updateFilteredPointDisplayMode,
         setPointHover,
         setLabelHover,

@@ -9,6 +9,7 @@ import { TargetRenderTimeSlider } from './TargetRenderTimeSlider';
 import { StatsDisplay } from './StatsDisplay';
 import { HoverControlPanel } from './HoverControlPanel';
 import { TimeFilterSlider } from './TimeFilterSlider';
+import { PointCardLimitInput } from './PointCardLimitInput';
 
 export function ControlPanel() {
   return (
@@ -21,6 +22,7 @@ export function ControlPanel() {
       <PointAlphaSlider />
       <PointSizeScaleSlider />
       <LabelFontSizeSlider />
+      <PointCardLimitInput />
       <TimeFilterSlider />
       <ColorExpressionInput />
       <SearchBox />
