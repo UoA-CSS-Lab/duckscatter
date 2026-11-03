@@ -172,7 +172,7 @@ export type ScatterPlotUpdatePath =
   | 'gpu-filter-columns-buffer'
   /** gpuWhereConditions/filteredPointDisplayMode の変更により GPU filter uniforms を更新した */
   | 'gpu-filter-uniforms'
-  /** GPU 描画オプションまたは visiblePointLimit の変更により render/compute uniforms を更新した */
+  /** GPU 描画オプションや目標描画時間の変更により render/compute uniforms を更新した */
   | 'gpu-render-uniforms'
   /** ラベルレイヤーの設定またはデータを更新した */
   | 'label-layer'
@@ -200,8 +200,6 @@ export interface ScatterPlotUpdatePlan {
 }
 
 export interface DataOptions {
-  /** レンダリングする表示ポイントの最大数 */
-  visiblePointLimit?: number;
   /** ポイントサイズ用のSQL式（例: "LOG(favorite_count + 1) * 2 + 2"） */
   sizeSql?: string;
   /** ポイントカラー用のSQL式（ARGB 32bit整数、例: "0xFF0000FF"） */
@@ -226,6 +224,8 @@ export interface DataOptions {
 }
 
 export interface GpuOptions {
+  /** 自動 LOD の目標 GPU 処理時間 (ms、既定 8)。絞り込みと点描画を含み、CPU ラベル描画は含まない。 */
+  targetRenderTimeMs?: number;
   /** 背景色（デフォルト: 透明な黒） */
   backgroundColor?: Color4f;
   /** グローバル透明度 (0.0-1.0, デフォルト: 1.0) */
@@ -334,34 +334,40 @@ export interface ScatterPlotOptions {
   onDatabaseReady?: (conn: AsyncDuckDBConnection) => Promise<void>;
 }
 
-/**
- * フレーム計測の統計（dev/デバッグ用）。`ScatterPlot.getFrameStats()` で取得する。
- * 描画レイヤを一切変えずに、毎フレームの負荷指標（fps・処理点数・GPU/CPU 時間）を読み出す。
- */
+/** GPU 時刻による計測、またはキュー完了までの粗い推定。 */
+export type GpuTimingSource = 'timestamp-query' | 'queue';
+
+/** フレームの負荷指標と、自動 LOD の目標時間・保持率を返す診断用統計。 */
 export interface FrameStats {
-  /** 計測が有効か（setInstrumentation(true) 済みか） */
+  /** 診断用の CPU・FPS・描画件数計測が有効か。自動 LOD の時間計測は常時動作する。 */
   enabled: boolean;
-  /** 直近の render() 呼び出し間隔から算出した平滑化 FPS */
+  /** 自動再描画を含む GPU 描画処理の呼び出し間隔から算出した平滑化 FPS。表示 FPS ではない。 */
   fps: number;
-  /** 直近フレームでフィルタ compute が走ったか（pan/zoom/filter 変化時のみ true） */
+  /** 直近フレームでフィルタ compute が走ったか。表示条件変更や自動 LOD 再調整時に true。 */
   computeRan: boolean;
-  /** 直近に compute が走ったフレームで評価した点数（現状は全点 = totalPointCount）。sticky（idle で 0 に戻さない） */
+  /** 直近に compute へ処理を要求した点数。GPU の実行成功を保証する値ではない。idle でも保持する。 */
   processedCount: number;
   /** 直近に compute が走ったフレームの描画点数（visibleIndices 件数, 非同期読み戻し・sticky） */
   drawnCount: number;
-  /** 描画件数の未計測・失敗を、実測の 0 件と区別する。 */
+  /** 描画件数を正常に読み戻せたか。未計測・失敗を実測の 0 件と区別する。 */
   drawnCountStatus: 'pending' | 'ready' | 'error';
   /** 総点数（parquet 行数） */
   totalPointCount: number;
-  /** LOD 予算（visiblePointLimit） */
-  pointBudget: number;
+  /** 自動 LOD の目標処理時間 (ms)。達成を保証する上限ではない。 */
+  targetRenderTimeMs: number;
+  /** 現在の LOD 保持率。実際の描画件数は表示範囲やフィルターにも依存する。 */
+  lodKeepRatio: number;
+  /** 直近の絞り込み＋描画の計測時間 (ms)。未取得は null。 */
+  renderTimeMs: number | null;
+  /** GPU 時刻による実測か、キュー完了までの粗い推定か。未取得は null。 */
+  renderTimeSource: GpuTimingSource | null;
   /** render() の CPU エンコード時間 (ms, 直近フレーム) */
   cpuEncodeMs: number;
-  /** compute が走ったフレームの GPU 完了時間 (ms, onSubmittedWorkDone, sticky)。フィルタ全点走査込み */
+  /** compute が走ったフレームの計測時間 (ms、sticky)。フィルタ全点走査込み。方式は renderTimeSource。 */
   gpuComputeMs: number;
-  /** render のみ（compute skip）フレームの GPU 完了時間 (ms, sticky)。gpuComputeMs との差が compute コストの目安 */
+  /** 描画のみのフレームの計測時間 (ms、sticky)。自動 LOD の調整には使わない。 */
   gpuIdleMs: number;
-  /** アプリが保持する GPU バッファ・テクスチャの要求確保量。ドライバ等の管理領域を除く。 */
+  /** アプリが保持する GPU バッファ・テクスチャの要求確保量。ブラウザ・ドライバの管理領域は含まない。 */
   gpuAllocatedBytes: number;
   /** 現在のズーム倍率 */
   zoom: number;

@@ -38,7 +38,7 @@ export function ScatterPlotCanvas() {
     return () => window.removeEventListener('resize', handleResize);
   }, [handleResize]);
 
-  // Zoom with wheel
+  // ホイールによるズームは、ライブラリ内部の描画だけを使う。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !plot) return;
@@ -53,14 +53,13 @@ export function ScatterPlotCanvas() {
       const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
       const newZoom = plot.getZoom() * zoomFactor;
       plot.zoomToPoint(newZoom, x * dpr, y * dpr);
-      plot.render();
     };
 
     canvas.addEventListener('wheel', handleWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [plot]);
 
-  // Pan with mouse drag
+  // ドラッグによるパン。pan() 内部で描画されるので、同じ位置を二重に描かない。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !plot) return;
@@ -76,13 +75,13 @@ export function ScatterPlotCanvas() {
       const dx = e.clientX - lastMouseRef.current.x;
       const dy = e.clientY - lastMouseRef.current.y;
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
+      if (dx === 0 && dy === 0) return;
 
       const rect = canvas.getBoundingClientRect();
-      // Convert pixel delta to clip space delta (-1 to 1)
+      // ピクセルの移動量を、-1 から 1 のクリップ座標の移動量へ変換する。
       const clipDx = (dx / rect.width) * 2;
-      const clipDy = -(dy / rect.height) * 2; // Y is inverted
+      const clipDy = -(dy / rect.height) * 2; // Y 軸は上下を反転する。
       plot.pan(clipDx, clipDy);
-      plot.render();
     };
 
     const handleMouseUp = () => {
@@ -127,7 +126,7 @@ export function ScatterPlotCanvas() {
   return (
     <div ref={containerRef} className="absolute inset-0">
       <canvas ref={canvasRef} className="block w-full h-full" />
-      {state.hoveredPoint && mousePosition && (
+      {(state.hoveredPoint || state.hoveredLabel) && mousePosition && (
         <HoverInfoDisplay mousePosition={mousePosition} />
       )}
       {state.isLoading && (
@@ -136,10 +135,10 @@ export function ScatterPlotCanvas() {
         </div>
       )}
       {state.error && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-          <div className="text-red-500 p-4 max-w-md text-center">
+        <div className="pointer-events-none absolute inset-x-3 top-3 z-50 flex justify-center">
+          <div className="pointer-events-auto text-red-400 bg-zinc-950/95 rounded-lg p-4 max-w-3xl max-h-[60vh] overflow-auto text-left shadow-lg">
             <p className="font-bold">Error</p>
-            <p>{state.error}</p>
+            <p className="whitespace-pre-wrap break-words">{state.error}</p>
           </div>
         </div>
       )}

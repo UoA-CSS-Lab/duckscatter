@@ -112,7 +112,22 @@ export function PerfOverlay() {
         }
       />
       <Row k="total" v={stats.totalPointCount.toLocaleString()} />
-      <Row k="budget" v={stats.pointBudget.toLocaleString()} />
+      <Row k="目標 GPU 時間" v={`${stats.targetRenderTimeMs.toFixed(1)} ms`} />
+      <Row k="LOD 保持率" v={`${(stats.lodKeepRatio * 100).toFixed(2)}%`} />
+      <Row
+        k="計測 GPU 時間"
+        v={stats.renderTimeMs === null ? '未取得' : `${stats.renderTimeMs.toFixed(2)} ms`}
+      />
+      <Row
+        k="時間の計測方法"
+        v={
+          stats.renderTimeSource === 'timestamp-query'
+            ? 'GPU 時刻'
+            : stats.renderTimeSource === 'queue'
+              ? 'キュー完了の推定'
+              : '未取得'
+        }
+      />
       <Row k="DuckDB 管理メモリ" v={duckdbMemoryText} />
       <Row k="GPU 確保量" v={gpuMemoryText} />
       <Row k="cpu enc" v={`${stats.cpuEncodeMs.toFixed(2)} ms`} />

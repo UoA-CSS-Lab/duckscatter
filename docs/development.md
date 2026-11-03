@@ -33,7 +33,7 @@ npm run lint:all
 
 変更した経路に応じて、WebGPU が利用できるブラウザで確認する。フィルター、ブラシ、ホバー、ラベルに変更がある場合は、[用語集](../CONTEXT.md) の一致点・描画点・選択点を区別して期待結果を確認する。
 
-性能を比較するときは、同じデータと設定で俯瞰とズームインを別々に記録する。データの点数・列・ファイルサイズ、端末、ブラウザ、キャンバス寸法、描画予算、操作と計測方法を添える。対応点数やフレームレートの保証を、新しい実測なしに追加しない。
+性能を比較するときは、同じデータと設定で俯瞰とズームインを別々に記録する。データの点数・列・ファイルサイズ、端末、ブラウザ、キャンバス寸法、目標描画時間・保持率、操作と計測方法を添える。対応点数やフレームレートの保証を、新しい実測なしに追加しない。
 
 ```typescript
 plot.setInstrumentation(true);
@@ -50,7 +50,10 @@ console.log(plot.getLastUpdatePlan());
 | `processedCount` | 直近に compute を実行した際の走査件数。現行は全点数 |
 | `drawnCount` | `visibleIndices` の非同期読み戻し。`grayed` の不一致点の描画件数は含まない |
 | `cpuEncodeMs` | GPU レイヤー内の CPU 処理時間。後に実行するラベル描画を含まない |
-| `gpuComputeMs` / `gpuIdleMs` | submit 後から `onSubmittedWorkDone()` 完了までの経過時間を、compute 有無で分けた値。シェーダー単体の GPU 時間ではない |
+| `targetRenderTimeMs` | 利用者が指定した GPU 処理時間の目標。達成保証ではない |
+| `lodKeepRatio` | 現在の間引き保持率。実際に描画された割合ではない |
+| `renderTimeMs` / `renderTimeSource` | 絞り込み＋描画の直近の計測と方式。`timestamp-query` は GPU 時刻、`queue` はキュー待ちや JS 通知遅延を含む推定。未取得は null |
+| `gpuComputeMs` / `gpuIdleMs` | 絞り込みを含むフレームと描画のみのフレームの計測を別々に保持する。異なるフレームの差分を厳密な compute 時間とは扱わない |
 
 件数と GPU 時間は直近の取得値を保持する。`drawnCount` は間引いて取得するため遅れもあり、静止したフレームで値が 0 に戻るわけではない。
 

@@ -102,7 +102,10 @@ export class WebGPUContext {
     }
 
     try {
-      this.device = await adapter.requestDevice();
+      // GPU 側の経過時間を測れる環境では、自動 LOD に使う任意機能を有効にする。
+      this.device = await adapter.requestDevice({
+        requiredFeatures: adapter.features.has('timestamp-query') ? ['timestamp-query'] : [],
+      });
     } catch (e) {
       throw new Error(`Failed to get GPU device: ${e}`, { cause: e });
     }

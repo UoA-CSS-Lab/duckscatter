@@ -40,12 +40,13 @@ export type {
   LabelHoverCallback,
   // Instrumentation (dev/debug)
   FrameStats,
+  GpuTimingSource,
 } from './types.js';
 
 export {
   MAX_GPU_FILTER_COLUMNS,
   GPU_FILTER_COLUMN_COMPONENTS,
-  DEFAULT_VISIBLE_POINT_LIMIT,
+  DEFAULT_TARGET_RENDER_TIME_MS,
 } from './constants.js';
 export { diagnoseWebGPU } from './diagnostics.js';
 export type { WebGPUDiagnostics } from './diagnostics.js';

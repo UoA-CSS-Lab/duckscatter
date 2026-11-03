@@ -8,5 +8,5 @@ export const MAX_GPU_FILTER_COLUMNS = 4;
 /** Number of f32 components stored per point in the GPU filter column buffer. */
 export const GPU_FILTER_COLUMN_COMPONENTS = 4;
 
-/** Default maximum number of points that the WebGPU LOD pass tries to keep visible. */
-export const DEFAULT_VISIBLE_POINT_LIMIT = 5_000_000;
+/** 点の絞り込みと GPU 描画を合わせた、自動 LOD の目標処理時間。 */
+export const DEFAULT_TARGET_RENDER_TIME_MS = 8;

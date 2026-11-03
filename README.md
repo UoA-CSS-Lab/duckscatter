@@ -107,12 +107,13 @@ duckscatterは、Parquet形式のデータファイルを読み込みます。�
 
 以下は設定項目を示す型の擬似コードです。実行可能な初期化例は「最小の利用例」を参照してください。
 
+点の描画量は `gpu.targetRenderTimeMs`（既定 8 ms）から自動調整します。変更は `plot.update({ gpu: { targetRenderTimeMs: 8 } })` で行います。絞り込みと点描画の GPU 処理時間が対象で、CPU のラベル描画や読み込みは含みません。目標時間の達成や FPS は保証しません。旧 `data.visiblePointLimit` と `DEFAULT_VISIBLE_POINT_LIMIT`、統計の `pointBudget` は廃止し、公開定数は `DEFAULT_TARGET_RENDER_TIME_MS` に置き換えています。
+
 ```typescript
 const plot = new ScatterPlot({
   canvas: HTMLCanvasElement,  // 描画先のcanvas要素
   dataUrl: string,            // ParquetファイルのURL
   data: {
-    visiblePointLimit?: number,               // LOD の描画予算（デフォルト: 5,000,000、厳密な上限ではない）
     sizeSql?: string,                         // サイズ計算SQL式（デフォルト: "3"）
     colorSql?: string,                        // 色計算SQL式（ARGB 32bit整数、デフォルト: "0x4D4D4DCC"）
     reloadPoints?: boolean,                   // update() 時に全点の描画属性を再取得（SQL の参照値を変更した場合）
@@ -121,6 +122,7 @@ const plot = new ScatterPlot({
     gpuWhereConditions?: GpuWhereCondition[], // GPUフィルター条件
   },
   gpu?: {
+    targetRenderTimeMs?: number,  // 絞り込み＋GPU 描画の目標時間（ms、デフォルト: 8）
     backgroundColor?: Color4f,  // 背景色
     pointAlpha?: number,          // グローバル透明度（0.0-1.0、デフォルト: 1.0）
     pointSizeScale?: number,      // グローバルサイズスケール（デフォルト: 1.0）
@@ -284,7 +286,7 @@ console.log(plot.getLastUpdatePlan()?.paths);
 | `duckdb-visibility-flags` | `whereConditions` 変更により DuckDB で visibility bitmap を再生成 |
 | `gpu-filter-columns-buffer` | `gpuFilterColumns` 変更により GPU filter column buffer を再アップロード |
 | `gpu-filter-uniforms` | `gpuWhereConditions` / `filteredPointDisplayMode` 変更。高頻度操作向け |
-| `gpu-render-uniforms` | 背景色・透明度・サイズスケール・`visiblePointLimit` などの更新 |
+| `gpu-render-uniforms` | 背景色・透明度・サイズスケール・`targetRenderTimeMs` などの更新 |
 | `label-layer` | ラベル設定またはラベルデータの更新 |
 | `interaction-callbacks` | hover などの callback 更新 |
 
