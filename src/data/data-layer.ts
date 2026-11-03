@@ -82,7 +82,7 @@ export class DataLayer {
   };
 
   /** WhereConditionから生成されたビジビリティフラグのキャッシュ（WHERE条件なし時は空） */
-  private visibilityFlags = new Uint32Array(0);
+  private visibilityFlags: Uint32Array = new Uint32Array(0);
   /** GPUフィルターカラムデータのキャッシュ（最大4値/ポイント） */
   private filterColumnData = new Float32Array(0);
   /** 現在のGPUフィルターレンジ（スライダーで高頻度更新） */
@@ -364,23 +364,27 @@ export class DataLayer {
       }
       const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
 
-      // 可視ポイントのrowidを取得
+      // 一致する行だけを 32 点単位で集約する。欠けたワードも 0 で埋め、GPU と同じ順番で返す。
+      const wordCount = Math.ceil(totalCount / 32);
       const data = await this.repository!.query({
-        toString: () => `SELECT rowid FROM parquet_data ${whereClause} ORDER BY rowid`,
+        toString: () =>
+          `WITH __matching_words AS (` +
+          `SELECT rowid // 32 AS __word_index__, ` +
+          `bit_or(1::UINTEGER << ((rowid % 32)::UINTEGER)) AS __flags__ ` +
+          `FROM parquet_data ${whereClause} GROUP BY rowid // 32) ` +
+          `SELECT COALESCE(__matching_words.__flags__, 0::UINTEGER) AS __flags__ ` +
+          `FROM range(${wordCount}) AS __words(__word_index__) ` +
+          `LEFT JOIN __matching_words USING (__word_index__) ORDER BY __words.__word_index__`,
       });
       if (!data) {
         return null;
       }
 
-      // ビットマップを構築（初期値は全て0=非可視）
-      const wordCount = Math.ceil(totalCount / 32);
-      const flags = new Uint32Array(wordCount);
-      flags.fill(0);
-
-      const idxArray = data.columnData.get('rowid')!.toArray();
-      for (let i = 0; i < idxArray.length; i++) {
-        const idx = Number(idxArray[i]);
-        flags[idx >> 5] |= 1 << (idx & 31);
+      // 行ごとの JS 変換はせず、Arrow の u32 列を使う。複数チャンクの場合だけ連結する。
+      // CPU ホバーにも同じ連続配列を渡し、GPU 転送では byteOffset と byteLength を保持する。
+      const flags = data.columnData.get('__flags__')!.toArray();
+      if (!(flags instanceof Uint32Array) || flags.length !== wordCount) {
+        throw new Error('Visibility query must return one u32 value per 32 points');
       }
 
       this.visibilityFlags = this.whereConditions.length === 0 ? new Uint32Array(0) : flags;
