@@ -113,6 +113,7 @@ const plot = new ScatterPlot({
     visiblePointLimit?: number,               // LOD の描画予算（デフォルト: 5,000,000、厳密な上限ではない）
     sizeSql?: string,                         // サイズ計算SQL式（デフォルト: "3"）
     colorSql?: string,                        // 色計算SQL式（ARGB 32bit整数、デフォルト: "0x4D4D4DCC"）
+    reloadPoints?: boolean,                   // update() 時に全点の描画属性を再取得（SQL の参照値を変更した場合）
     whereConditions?: WhereCondition[],       // フィルタ条件（CPU側）
     gpuFilterColumns?: string[],              // GPUフィルタリング用カラム名（最大4つ）
     gpuWhereConditions?: GpuWhereCondition[], // GPUフィルター条件
@@ -125,7 +126,7 @@ const plot = new ScatterPlot({
   labels?: {
     url?: string,                             // GeoJSONファイルのURL
     fontSize?: number,                        // フォントサイズ（デフォルト: 12）
-    filterLambda?: LabelFilterLambda,         // ラベル表示フィルタ（false=非マッチ）
+    filterLambda?: LabelFilterLambda | null,  // false=非マッチ。更新時は null で解除、undefined は据え置き
     unmatchedLabelOpacity?: number,           // 非マッチラベルをグレー化せず元色のまま dim（0-1）
     onClick?: (label: Label) => void,         // クリックコールバック
     hoverOutlineOptions?: HoverOutlineOptions, // ホバーアウトライン設定
@@ -277,7 +278,7 @@ console.log(plot.getLastUpdatePlan()?.paths);
 
 | 経路 | 意味 |
 |---|---|
-| `duckdb-all-points` | `sizeSql` / `colorSql` 変更により DuckDB で GPU 用 point buffer を再生成 |
+| `duckdb-all-points` | `sizeSql` / `colorSql` の変更、または `reloadPoints: true` により DuckDB で GPU 用 point buffer を再生成 |
 | `duckdb-visibility-flags` | `whereConditions` 変更により DuckDB で visibility bitmap を再生成 |
 | `gpu-filter-columns-buffer` | `gpuFilterColumns` 変更により GPU filter column buffer を再アップロード |
 | `gpu-filter-uniforms` | `gpuWhereConditions` / `filteredPointDisplayMode` 変更。高頻度操作向け |

@@ -1,5 +1,6 @@
 import { PointAlphaSlider } from './PointAlphaSlider';
 import { PointSizeScaleSlider } from './PointSizeScaleSlider';
+import { LabelFontSizeSlider } from './LabelFontSizeSlider';
 import { ColorExpressionInput } from './ColorExpressionInput';
 import { SearchBox } from './SearchBox';
 import { FilteredPointModeSelector } from './FilteredPointModeSelector';
@@ -19,6 +20,7 @@ export function ControlPanel() {
       <PointLimitSlider />
       <PointAlphaSlider />
       <PointSizeScaleSlider />
+      <LabelFontSizeSlider />
       <TimeFilterSlider />
       <ColorExpressionInput />
       <SearchBox />

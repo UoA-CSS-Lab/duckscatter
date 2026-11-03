@@ -164,7 +164,7 @@ export interface SelectionStyle {
 
 /** update() が実際に通った処理経路 */
 export type ScatterPlotUpdatePath =
-  /** sizeSql/colorSql の変更により DuckDB で x/y/size/color を再 materialize した */
+  /** SQL 式の変更または reloadPoints により、DuckDB で全点の描画属性を再生成した */
   | 'duckdb-all-points'
   /** whereConditions の変更、または全点再読込に伴い DuckDB で visibility bitmap を更新した */
   | 'duckdb-visibility-flags'
@@ -206,6 +206,11 @@ export interface DataOptions {
   sizeSql?: string;
   /** ポイントカラー用のSQL式（ARGB 32bit整数、例: "0xFF0000FF"） */
   colorSql?: string;
+  /**
+   * update() 時に、同じ SQL 式のまま全点の描画属性を再取得する。
+   * 色・サイズの参照テーブルを更新した場合に使う。行集合・rowid・座標は固定する。
+   */
+  reloadPoints?: boolean;
   /** データをフィルタリングするWHERE条件（ANDのみ） */
   whereConditions?: WhereCondition[];
   /**
@@ -250,8 +255,8 @@ export interface LabelOptions {
   file?: File | ArrayBuffer;
   /** ラベルのフォントサイズ（ピクセル単位、デフォルト: 12） */
   fontSize?: number;
-  /** プロパティに基づいてラベルの表示を制御するフィルター関数 */
-  filterLambda?: LabelFilterLambda;
+  /** ラベルの表示フィルター。update() では undefined は据え置き、null は解除。 */
+  filterLambda?: LabelFilterLambda | null;
   /**
    * filterLambda が false の「非マッチ」ラベルの不透明度（0-1）。指定すると非マッチラベルを
    * グレー化せず元のクラスタ色のまま opacity を下げて描画する（dim-only）。未指定はグレー表示。

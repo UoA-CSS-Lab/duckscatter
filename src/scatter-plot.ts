@@ -335,6 +335,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
       const result = await this.dataLayer.updateOptions({
         sizeSql: options.data.sizeSql,
         colorSql: options.data.colorSql,
+        reloadPoints: options.data.reloadPoints,
         whereConditions: options.data.whereConditions,
         gpuFilterColumns: options.data.gpuFilterColumns,
       });

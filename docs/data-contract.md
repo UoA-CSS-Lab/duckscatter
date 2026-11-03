@@ -28,6 +28,8 @@
 
 ## 問い合わせと件数
 
+SQL で色・サイズの参照テーブルを更新した後は、`plot.update({ data: { reloadPoints: true } })` で全点の描画属性と SQL フィルターの一致フラグを再取得できます。`colorSql` や `sizeSql` の文字列を変える必要はありません。`runQuery()` で SQL を実行するだけでは描画キャッシュは更新しません。この再取得でも行集合、`rowid` と点 ID の対応、座標を固定する前提は同じです。
+
 `runQuery()` へ渡す SQL に、表示中のフィルター・選択・表示範囲・LOD の条件は自動適用しない。`SELECT COUNT(*) FROM parquet_data` は全件数を返す。集計や一覧を現在の絞り込みに合わせる場合は、利用側が対応する条件をクエリに指定する。
 
 `getSelectionCount()` は選択集合の全件数であり、表示中の選択点数ではない。`getFrameStats().drawnCount` は描画された一致点の取得値で、灰色の不一致点を含まず、全描画点数とも異なる。意味は [用語集](../CONTEXT.md)、計測の限界は [開発手順](development.md) を参照。
