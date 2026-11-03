@@ -177,7 +177,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     timeRangeFilter: { min: number | null; max: number | null };
   }>({
     searchText: '',
-    sizeSql: '5',
+    sizeSql: '5::FLOAT',
     colorSql: buildSingleColorSql(DEFAULT_POINT_COLOR),
     colorMode: 'cluster',
     pointColor: DEFAULT_POINT_COLOR,

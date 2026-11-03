@@ -5,6 +5,7 @@ import type { WhereCondition, ScatterPlotError } from '../types.js';
 import { createError } from '../errors.js';
 import type { AllPointsData } from '../renderer/gpu-layer.js';
 import { SpatialPointIndex } from './spatial-index.js';
+import { PointPacker, type PointCoordinates } from './point-packing.js';
 import { GPU_FILTER_COLUMN_COMPONENTS, MAX_GPU_FILTER_COLUMNS } from '../constants.js';
 
 /**
@@ -43,15 +44,6 @@ export interface DataLayerUpdateResult {
 }
 
 /**
- * 全ポイントデータのキャッシュ（SoA形式）
- */
-interface PointsCache {
-  xArr: Float64Array | Float32Array;
-  yArr: Float64Array | Float32Array;
-  length: number;
-}
-
-/**
  * データ取得とクエリ管理を担当するレイヤー
  * 責務:
  * - ParquetReaderを介したParquetデータの読み込みと管理
@@ -83,7 +75,7 @@ export class DataLayer {
   private pendingConfigWarning: ScatterPlotError | null = null;
 
   /** 全ポイントデータのキャッシュ（ポイント検索用、SoA形式） */
-  private pointsCache: PointsCache = {
+  private pointsCache: PointCoordinates = {
     xArr: new Float64Array(0),
     yArr: new Float64Array(0),
     length: 0,
@@ -97,6 +89,8 @@ export class DataLayer {
   private gpuFilterRanges: { columnIndex: number; min: number; max: number }[] = [];
   /** 空間ポイントインデックス（四分木ベース） */
   private spatialIndex = new SpatialPointIndex();
+  /** GPU 用の巡回置換と、チャンクサイズごとの順序表 */
+  private readonly pointPacker = new PointPacker();
 
   /**
    * DataLayerインスタンスを作成する
@@ -169,6 +163,7 @@ export class DataLayer {
     this.flushPendingConfigWarning();
     // 入力が変わる場合は、同じ件数でも以前の座標と四分木を再利用しない。
     this.spatialIndex.destroy();
+    this.pointPacker.clear();
     this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
     this.repository = await createParquetReader();
     if (typeof source === 'string') {
@@ -227,7 +222,7 @@ export class DataLayer {
     try {
       const data = await this.repository!.query({
         toString: () =>
-          `SELECT x, y, CAST((${this.sizeSql}) AS DOUBLE) AS __size__, CAST((${this.colorSql}) AS INTEGER) AS __color__, ` +
+          `SELECT x, y, (${this.sizeSql}) AS __size__, (${this.colorSql}) AS __color__, ` +
           // サイズ基準 LOD 優先度 [0,1)（0=最大サイズ）。サイズ降順＋rowid を tiebreaker にランク付けして正規化。
           // 均一サイズ（sizeSql=定数）なら tiebreaker の rowid 順＝ID 順になる。
           `CAST((CAST(ROW_NUMBER() OVER (ORDER BY (${this.sizeSql}) DESC, rowid ASC) AS DOUBLE) - 1.0) / GREATEST(CAST(COUNT(*) OVER () AS DOUBLE), 1.0) AS FLOAT) AS __priority__ ` +
@@ -240,44 +235,21 @@ export class DataLayer {
         };
       }
 
-      const xColumn = data.columnData.get('x')!;
-      const yColumn = data.columnData.get('y')!;
-      const sizeColumn = data.columnData.get('__size__')!;
-      const colorColumn = data.columnData.get('__color__')!;
+      // 元の Arrow 領域を並べ替える前に、別列の LOD 優先度を独立した配列に保持する。
       const priorityColumn = data.columnData.get('__priority__');
-
-      const buffer = new ArrayBuffer(data.rowCount * 16);
-      const floatView = new Float32Array(buffer);
-      const uint32View = new Uint32Array(buffer);
-
-      const xArr = xColumn.toArray();
-      const yArr = yColumn.toArray();
-      const sizeArr = sizeColumn.toArray();
-      const colorArr = colorColumn.toArray();
-
-      const rowCount = data.rowCount;
-
-      for (let i = 0; i < rowCount; i++) {
-        const base = i * 4;
-        floatView[base] = xArr[i];
-        floatView[base + 1] = yArr[i];
-        uint32View[base + 2] = colorArr[i];
-        floatView[base + 3] = sizeArr[i];
-      }
-
-      // 座標と点 ID は固定なので、描画属性だけの更新では座標キャッシュと四分木を再利用する。
-      if (!this.spatialIndex.isBuilt()) {
-        this.pointsCache = { xArr, yArr, length: rowCount };
-        this.spatialIndex.build(xArr, yArr, rowCount);
-      }
-
-      // サイズ基準 LOD 優先度（[0,1), 0=最大サイズ, rowid 順）。GPU 間引きでサイズの大きい点を優先的に残す。
       const lodPriority = priorityColumn
         ? new Float32Array(priorityColumn.toArray() as ArrayLike<number>)
         : undefined;
+      const needsSpatialIndex = !this.spatialIndex.isBuilt();
+      const packed = this.pointPacker.pack(data, needsSpatialIndex ? undefined : this.pointsCache);
+      if (needsSpatialIndex) {
+        this.pointsCache = packed.coordinates;
+        const { xArr, yArr, length } = packed.coordinates;
+        this.spatialIndex.build(xArr, yArr, length);
+      }
 
       return {
-        instanceData: floatView,
+        instanceData: packed.instanceData,
         totalCount: data.rowCount,
         lodPriority,
       };
@@ -608,7 +580,7 @@ export class DataLayer {
   async findPointById(pointId: number): Promise<Record<string, any> | null> {
     const data = await this.repository!.query({
       toString: () =>
-        `SELECT *, CAST((${this.sizeSql}) AS DOUBLE) AS __size__, CAST((${this.colorSql}) AS INTEGER) AS __color__ FROM parquet_data WHERE rowid = ${pointId}`,
+        `SELECT *, (${this.sizeSql}) AS __size__, (${this.colorSql}) AS __color__ FROM parquet_data WHERE rowid = ${pointId}`,
     });
 
     if (!data || data.rowCount === 0) {
@@ -628,6 +600,7 @@ export class DataLayer {
    */
   async destroy(): Promise<void> {
     this.spatialIndex.destroy();
+    this.pointPacker.clear();
     this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
     if (this.repository) {
       await this.repository.close();
