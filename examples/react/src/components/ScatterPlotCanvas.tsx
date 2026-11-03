@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
 import { useScatterPlot } from '../context/ScatterPlotContext';
 import { HoverInfoDisplay } from './HoverInfoDisplay';
+import { PointCardOverlay } from './PointCardOverlay';
 
 export function ScatterPlotCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -10,6 +11,9 @@ export function ScatterPlotCanvas() {
   const isDraggingRef = useRef(false);
   const lastMouseRef = useRef({ x: 0, y: 0 });
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
+  const [cardPointIds, setCardPointIds] = useState<readonly number[]>([]);
+  const hasPointCard =
+    state.hoveredPoint !== null && cardPointIds.includes(Number(state.hoveredPoint.__point_id__));
 
   useEffect(() => {
     if (canvasRef.current && !initializedRef.current) {
@@ -38,7 +42,7 @@ export function ScatterPlotCanvas() {
     return () => window.removeEventListener('resize', handleResize);
   }, [handleResize]);
 
-  // ホイールによるズームは、ライブラリ内部の描画だけを使う。
+  // 吹き出しが透過したホイール操作を、キャンバスで受け取ってズームする。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !plot) return;
@@ -46,13 +50,14 @@ export function ScatterPlotCanvas() {
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      const dpr = window.devicePixelRatio || 1;
+      if (rect.width <= 0 || rect.height <= 0) return;
+      // DOM の表示寸法と実際のキャンバス寸法の比率で、物理ピクセルへ変換する。
+      const x = ((e.clientX - rect.left) * canvas.width) / rect.width;
+      const y = ((e.clientY - rect.top) * canvas.height) / rect.height;
 
       const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
       const newZoom = plot.getZoom() * zoomFactor;
-      plot.zoomToPoint(newZoom, x * dpr, y * dpr);
+      plot.zoomToPoint(newZoom, x, y);
     };
 
     canvas.addEventListener('wheel', handleWheel, { passive: false });
@@ -101,7 +106,7 @@ export function ScatterPlotCanvas() {
     };
   }, [plot]);
 
-  // Track mouse position for hover tooltip
+  // ホバーツールチップ用に、画面上のマウス位置を追跡する。
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -126,7 +131,8 @@ export function ScatterPlotCanvas() {
   return (
     <div ref={containerRef} className="absolute inset-0">
       <canvas ref={canvasRef} className="block w-full h-full" />
-      {(state.hoveredPoint || state.hoveredLabel) && mousePosition && (
+      <PointCardOverlay onVisiblePointIdsChange={setCardPointIds} />
+      {(state.hoveredLabel || (state.hoveredPoint && !hasPointCard)) && mousePosition && (
         <HoverInfoDisplay mousePosition={mousePosition} />
       )}
       {state.isLoading && (

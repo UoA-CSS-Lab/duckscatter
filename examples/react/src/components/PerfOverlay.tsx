@@ -96,7 +96,7 @@ export function PerfOverlay() {
       : '未取得';
 
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 z-50 select-none rounded-lg bg-black/80 px-3 py-2 text-xs text-gray-100 shadow-lg backdrop-blur-sm">
+    <div className="pointer-events-none absolute bottom-3 left-3 z-50 select-none rounded-lg bg-black/80 px-3 py-2 text-xs text-gray-100 shadow-lg">
       <div className="mb-1 font-semibold text-emerald-400">perf</div>
       <Row k="fps*" v={String(stats.fps)} />
       <Row k="compute" v={stats.computeRan ? 'ran' : 'idle'} />

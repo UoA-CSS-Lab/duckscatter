@@ -137,6 +137,47 @@ export interface ScreenBrushRect {
   y1: number;
 }
 
+/** 散布図内の点 ID と、固定されたデータ空間の座標。 */
+export interface PointPosition {
+  id: number;
+  x: number;
+  y: number;
+}
+
+/** 元の属性と、現在の描画式で計算した属性。内部 ID は元データの ID 列と区別する。 */
+export interface PointAttributes extends Record<string, unknown> {
+  __point_id__: number;
+  __size__: unknown;
+  __color__: unknown;
+}
+
+/** 画面内一致点の上限付き検索結果。LOD とカードの配置結果は含まない。 */
+export interface ViewportPointQueryResult {
+  /** 上限以下の場合の全候補。上限超過時と準備中は空配列。順序は保証しない。 */
+  points: PointPosition[];
+  /** 一致点が上限を超えたか。超過後の正確な件数は数えない。 */
+  limitExceeded: boolean;
+  /** 初期化済みで、点データ・フィルターの更新中ではないか。 */
+  ready: boolean;
+}
+
+/** DOM 側が固定座標を投影するための表示状態。幅と高さは物理ピクセル。 */
+export interface ScatterPlotView {
+  width: number;
+  height: number;
+  zoom: number;
+  panX: number;
+  panY: number;
+}
+
+/** 画面内一致点の検索・属性キャッシュを無効化する通知。 */
+export interface PointDataChangeEvent {
+  /** 並行して開始された更新がひとつでも完了していなければ true。 */
+  pending: boolean;
+  /** 点の属性を再取得する必要がある更新か。フィルターだけの変更では false。 */
+  attributesChanged: boolean;
+}
+
 /** brush 操作のオプション */
 export interface BrushOptions {
   /** 合成モード（既定 'replace'） */
@@ -422,4 +463,10 @@ export interface ScatterPlotError {
 /** ScatterPlot EventEmitter用のイベントマップ */
 export interface ScatterPlotEventMap {
   error: ScatterPlotError;
+  /** パン・ズーム・キャンバスサイズが変わった直後。描画ごとには発火しない。 */
+  viewchange: ScatterPlotView;
+  /** 点データ・フィルターの更新開始時と完了時。任意 SQL の実行では発火しない。 */
+  pointdatachange: PointDataChangeEvent;
+  /** 非同期のリソース解放を待つ前に発火する。 */
+  destroy: undefined;
 }

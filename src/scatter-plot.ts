@@ -14,6 +14,9 @@ import type {
   ScatterPlotUpdatePath,
   ScatterPlotUpdatePlan,
   FrameStats,
+  ScatterPlotView,
+  ViewportPointQueryResult,
+  PointAttributes,
 } from './types.js';
 import { DataLayer, type ParquetData } from './data/index.js';
 import { GpuLayer } from './renderer/index.js';
@@ -34,6 +37,12 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
   private readonly dataLayer: DataLayer;
   private gpuLayer: GpuLayer;
   private labelLayer: LabelLayer;
+  private readonly canvas: HTMLCanvasElement;
+  /** 初期化と更新の途中に、古いフィルターで候補を公開しないための状態。 */
+  private pointDataReady = false;
+  private pointDataPending = 0;
+  private destroyed = false;
+  private lastView: ScatterPlotView | null = null;
 
   private readonly dataSource: string | File | ArrayBuffer;
   private readonly labelSource?: string | File | ArrayBuffer;
@@ -55,6 +64,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    */
   constructor(options: ScatterPlotOptions) {
     super();
+    this.canvas = options.canvas;
 
     this.dataLayer = new DataLayer({
       sizeSql: options.data.sizeSql,
@@ -137,6 +147,8 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
           this.gpuLayer.uploadVisibilityFlags(visibilityData.flags, true);
         }
       }
+      this.pointDataReady = !this.destroyed;
+      this.emit('pointdatachange', { pending: false, attributesChanged: true });
     } catch (e) {
       const error = this.categorizeInitError(e);
       this.emitError(error);
@@ -313,6 +325,19 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
   render(): void {
     this.gpuLayer.render();
     this.labelLayer.render();
+    const view = this.getViewState();
+    const previous = this.lastView;
+    if (
+      !previous ||
+      view.width !== previous.width ||
+      view.height !== previous.height ||
+      view.zoom !== previous.zoom ||
+      view.panX !== previous.panX ||
+      view.panY !== previous.panY
+    ) {
+      this.lastView = { ...view };
+      this.emit('viewchange', view);
+    }
   }
 
   /**
@@ -329,6 +354,36 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    * @param options 更新する設定オプション
    */
   async update(options: Partial<ScatterPlotOptions>): Promise<void> {
+    const data = options.data;
+    const affectsPoints =
+      data !== undefined &&
+      (data.sizeSql !== undefined ||
+        data.colorSql !== undefined ||
+        data.reloadPoints === true ||
+        data.whereConditions !== undefined ||
+        data.gpuFilterColumns !== undefined ||
+        data.gpuWhereConditions !== undefined);
+    const attributesChanged =
+      data?.sizeSql !== undefined || data?.colorSql !== undefined || data?.reloadPoints === true;
+    if (affectsPoints) {
+      this.pointDataPending++;
+      this.emit('pointdatachange', { pending: true, attributesChanged });
+    }
+    try {
+      await this.applyUpdate(options);
+    } finally {
+      if (affectsPoints) {
+        this.pointDataPending--;
+        this.emit('pointdatachange', {
+          pending: this.pointDataPending > 0,
+          attributesChanged,
+        });
+      }
+    }
+  }
+
+  /** 更新開始から完了までを通知したうえで、既存の各レイヤー更新を実行する。 */
+  private async applyUpdate(options: Partial<ScatterPlotOptions>): Promise<void> {
     const updatePaths = new Set<ScatterPlotUpdatePath>();
     if (options.data !== undefined) {
       const gpuWhereConditionsChanged = options.data.gpuWhereConditions !== undefined;
@@ -542,6 +597,54 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
     return this.gpuLayer.getPan();
   }
 
+  /** DOM 側で点の固定座標を投影するための表示状態を取得する。 */
+  getViewState(): ScatterPlotView {
+    const pan = this.gpuLayer.getPan();
+    return {
+      width: this.canvas.width,
+      height: this.canvas.height,
+      zoom: this.gpuLayer.getZoom(),
+      panX: pan.x,
+      panY: pan.y,
+    };
+  }
+
+  /**
+   * 中心座標が画面内にあるフィルター一致点を、LOD 前の集合から同期的に取得する。
+   * 上限 + 1 件で探索を打ち切る。上限超過時は候補を返さず、正確な全件数も数えない。
+   * GPU の余白や点の半径、alpha、選択状態は判定に含めない。
+   */
+  getPointsInViewport(limit: number = 10): ViewportPointQueryResult {
+    if (!Number.isSafeInteger(limit) || limit < 0) {
+      throw new RangeError('The viewport point limit must be a non-negative safe integer.');
+    }
+    const view = this.getViewState();
+    if (
+      !this.pointDataReady ||
+      this.pointDataPending > 0 ||
+      view.width <= 0 ||
+      view.height <= 0 ||
+      !Number.isFinite(view.zoom) ||
+      view.zoom <= 0 ||
+      !Number.isFinite(view.panX) ||
+      !Number.isFinite(view.panY)
+    ) {
+      return { points: [], limitExceeded: false, ready: false };
+    }
+    const aspect = view.width / view.height;
+    const points = this.dataLayer.findPointsInBounds(
+      {
+        minX: ((-1 - view.panX) * aspect) / view.zoom,
+        maxX: ((1 - view.panX) * aspect) / view.zoom,
+        minY: (-1 - view.panY) / view.zoom,
+        maxY: (1 - view.panY) / view.zoom,
+      },
+      limit + 1
+    );
+    const limitExceeded = points.length > limit;
+    return { points: limitExceeded ? [] : points, limitExceeded, ready: true };
+  }
+
   /**
    * 指定した差分だけパンする
    * @param dx 正規化座標でのX方向の差分
@@ -634,6 +737,11 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    */
   async runQuery(query: string | { toString: () => string }): Promise<ParquetData | undefined> {
     return await this.dataLayer.executeQuery(query);
+  }
+
+  /** 指定した内部 ID の属性と、現在の式で計算したサイズ・色をまとめて取得する。 */
+  async getPointsByIds(pointIds: readonly number[]): Promise<PointAttributes[]> {
+    return this.dataLayer.findPointsByIds(pointIds);
   }
 
   /**
@@ -873,6 +981,10 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    * リソースを破棄する
    */
   async destroy(): Promise<void> {
+    this.destroyed = true;
+    this.pointDataReady = false;
+    this.emit('destroy', undefined);
+    this.removeAllListeners();
     // 非同期の DB 切断を待つ前に、自動描画と画面上のイベント処理を止める。
     this.gpuLayer.destroy();
     this.labelLayer.destroy();

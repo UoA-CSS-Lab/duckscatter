@@ -1,4 +1,7 @@
-import { useScatterPlot } from '../context/ScatterPlotContext';
+import {
+  useScatterPlot,
+  DEFAULT_EXAMPLE_TARGET_RENDER_TIME_MS,
+} from '../context/ScatterPlotContext';
 import { Slider } from './Slider';
 
 export function TargetRenderTimeSlider() {
@@ -8,14 +11,14 @@ export function TargetRenderTimeSlider() {
     <Slider
       label="目標描画時間"
       min={1}
-      max={50}
+      max={100}
       step={1}
-      defaultValue={8}
+      defaultValue={DEFAULT_EXAMPLE_TARGET_RENDER_TIME_MS}
       disabled={state.isLoading}
       onChange={updateTargetRenderTime}
       formatValue={(v) => `${v} ms`}
       minLabel="1 ms"
-      maxLabel="50 ms"
+      maxLabel="100 ms"
     />
   );
 }

@@ -1,3 +1,5 @@
+import type { BrushBounds } from '../types.js';
+
 /**
  * 四分木ベースの空間インデックス
  * ホバーポイント検出を O(n) の全探索から O(log n) に高速化する
@@ -176,6 +178,50 @@ class QuadTree {
     return result.index;
   }
 
+  /** 矩形と交差する枝だけを辿り、一致点が指定件数に達したら打ち切る。 */
+  findInBounds(
+    bounds: BrushBounds,
+    limit: number,
+    isMatching: (index: number) => boolean
+  ): number[] {
+    const result: number[] = [];
+    const visit = (node: QuadTreeNode): void => {
+      const b = node.bounds;
+      if (
+        result.length >= limit ||
+        b.maxX < bounds.minX ||
+        b.minX > bounds.maxX ||
+        b.maxY < bounds.minY ||
+        b.minY > bounds.maxY
+      ) {
+        return;
+      }
+      if (node.indices) {
+        for (const index of node.indices) {
+          const x = this.xArr[index];
+          const y = this.yArr[index];
+          if (
+            x >= bounds.minX &&
+            x <= bounds.maxX &&
+            y >= bounds.minY &&
+            y <= bounds.maxY &&
+            isMatching(index)
+          ) {
+            result.push(index);
+            if (result.length >= limit) return;
+          }
+        }
+      } else {
+        for (const child of node.children!) {
+          visit(child);
+          if (result.length >= limit) return;
+        }
+      }
+    };
+    visit(this.root);
+    return result;
+  }
+
   /**
    * ノードを再帰的に探索して最近傍を見つける
    */
@@ -300,6 +346,44 @@ export class SpatialPointIndex {
     };
 
     return this.quadTree.findNearest(queryX, queryY, thresholdSq, isVisible);
+  }
+
+  /**
+   * SQL の一致ビットと GPU と同じ数値範囲で、矩形内の点を上限付きで取得する。
+   * 結果件数を制限する API であり、不一致点が多い場合の走査量の上限は保証しない。
+   */
+  findInBounds(
+    bounds: BrushBounds,
+    limit: number,
+    visibilityFlags: Uint32Array,
+    filterColumnData: Float32Array,
+    gpuFilterRanges: { columnIndex: number; min: number; max: number }[]
+  ): number[] {
+    if (!this.quadTree || limit <= 0) return [];
+
+    // GPU uniform と同じ f32 の閾値に揃える。同じ列の条件は GPU と同じく最後の範囲を使う。
+    const ranges = new Map<number, { min: number; max: number }>();
+    if (filterColumnData.length > 0) {
+      for (const range of gpuFilterRanges) {
+        if (range.columnIndex >= 0 && range.columnIndex < 4) {
+          ranges.set(range.columnIndex, {
+            min: Math.fround(range.min),
+            max: Math.fround(range.max),
+          });
+        }
+      }
+    }
+    return this.quadTree.findInBounds(bounds, limit, (index) => {
+      if (visibilityFlags.length > 0 && (visibilityFlags[index >> 5] & (1 << (index & 31))) === 0) {
+        return false;
+      }
+      for (const [column, range] of ranges) {
+        const value = filterColumnData[index * 4 + column];
+        // GPU の比較式に揃え、NaN も一致点に含めない。soft-edge は alpha の設定なので含めない。
+        if (!(value >= range.min && value <= range.max)) return false;
+      }
+      return true;
+    });
   }
 
   /**

@@ -10,7 +10,7 @@
 
 | 層 | 現在の責務 | 主な実装 |
 | --- | --- | --- |
-| データ | Parquet の読み込み、SQL、描画属性の生成、ホバー用空間検索 | [DataLayer](../src/data/data-layer.ts)、[ParquetReader](../src/data/repository.ts)、[SpatialPointIndex](../src/data/spatial-index.ts) |
+| データ | Parquet の読み込み、SQL、描画属性の生成、ホバーと画面内一致点の空間検索 | [DataLayer](../src/data/data-layer.ts)、[ParquetReader](../src/data/repository.ts)、[SpatialPointIndex](../src/data/spatial-index.ts) |
 | 点の描画 | GPU バッファ、LOD、範囲・条件判定、選択とホバー強調 | [GpuLayer](../src/renderer/gpu-layer.ts)、[WGSL](../src/renderer/shaders.ts) |
 | 注釈と操作 | Canvas 2D のラベル、ホバーアウトライン、ポインター入力 | [LabelLayer](../src/ui/label-layer.ts) |
 
@@ -89,6 +89,10 @@ LOD は `zoom <= 1` の俯瞰では、サイズ別累積件数から現在の保
 ポインターに最も近い点の検索は CPU の空間インデックスを使い、SQL・GPU 条件を考慮するが LOD を考慮しない。プログラムから `setPointHover(id)` を呼ぶ場合はフィルター一致も要求しない。このため、ホバー対象と描画点は一致するとは限らない。灰色を含む描画点をポインター対象にする [ADR-0005](adr/0005-hover-targets.md) は今後の変更方針であり、未実装。
 
 ## 注釈と視覚表現
+
+`getPointsInViewport(limit)` は固定座標の四分木で画面内一致点を探索し、上限 + 1 件で打ち切る。SQL の一致ビットと、GPU と同じ f32 閾値・同じ列の最後の範囲条件を使い、LOD と alpha は考慮しない。点の中心がキャンバス内にあることを条件とし、GPU のカリング余白は含めない。候補件数は制限するが、不一致点が多い場合の四分木の走査量までは制限しない。既存の最近傍ホバーの閾値判定との差は、引き続き [未対応事項](follow-ups.md#cpu-と-gpu-の範囲判定) で扱う。
+
+点カードの HTML は React example に置き、ライブラリ本体には候補・属性の取得と表示状態・データ更新の通知を追加する（[ADR-0008](adr/0008-point-cards-independent-of-lod.md)）。点を指すしっぽを持つ吹き出しを、現在の `size` が大きい点から配置し、同サイズでは `rowid` が小さい点を優先する。操作中はカードの位置だけを更新し、150 ms の停止後に候補としっぽを含む重なりを再判定する。`getPointsByIds()` は元の属性と現在の `sizeSql`・`colorSql` の値をひとつのクエリで取得する。取得は同時に 1 件だけ実行し、待機中の要求は最新の表示状態にまとめる。画面・フィルター・属性・散布図の寿命が変わった場合は古い応答を反映しない。
 
 ラベルは点と独立した位置付き注釈で、点との所属関係を自動計算しない。クラスタのラベルから所属点を強調する場合などは、利用側が対応する点 ID を渡す。
 
