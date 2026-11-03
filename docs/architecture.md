@@ -2,6 +2,8 @@
 
 コードを変更する際の前提と処理経路をまとめる。package version `1.22.0` の作業ツリーに対応する。[LOD ピラミッド提案](lod-pyramid-design.md)の方式は未導入。
 
+構成図のソース: [architecture.puml](architecture.puml)。
+
 ## 責務
 
 公開窓口の `ScatterPlot` が次の三層を調整する。座標計算やクラスタリングは利用側の責務とする（[ADR-0001](adr/0001-fixed-input-exploration.md)）。
