@@ -69,7 +69,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
     this.gpuLayer = new GpuLayer({
       canvas: options.canvas,
       backgroundColor: options.gpu?.backgroundColor,
-      visiblePointLimit: options.data.visiblePointLimit,
+      targetRenderTimeMs: options.gpu?.targetRenderTimeMs,
       pointAlpha: options.gpu?.pointAlpha,
       pointSizeScale: options.gpu?.pointSizeScale,
       selectionStyle: options.gpu?.selection,
@@ -268,7 +268,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    * @returns 分類されたScatterPlotErrorオブジェクト
    */
   private categorizeInitError(e: unknown): ScatterPlotError {
-    // シェーダーや pipeline の詳しい診断を、一般的な初期化エラーに置き換えない。
+    // シェーダーや pipeline の診断を、WebGPU 非対応という一般エラーへ置き換えない。
     if (e instanceof WebGPUInitializationError) return e.diagnostic;
     const message = e instanceof Error ? e.message : String(e);
     const cause = e instanceof Error ? e : undefined;
@@ -377,10 +377,10 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
       }
     }
 
-    if (options.gpu !== undefined || options.data?.visiblePointLimit !== undefined) {
+    if (options.gpu !== undefined) {
       this.gpuLayer.updateOptions({
         backgroundColor: options.gpu?.backgroundColor,
-        visiblePointLimit: options.data?.visiblePointLimit,
+        targetRenderTimeMs: options.gpu.targetRenderTimeMs,
         pointAlpha: options.gpu?.pointAlpha,
         pointSizeScale: options.gpu?.pointSizeScale,
         selectionStyle: options.gpu?.selection,
@@ -856,7 +856,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
   }
 
   /**
-   * フレーム計測の ON/OFF（dev/デバッグ用）。OFF 時は render() に追加コストを掛けない。
+   * 診断用の CPU・FPS・描画件数計測を切り替える。自動 LOD の時間計測は継続する。
    */
   setInstrumentation(on: boolean): void {
     this.gpuLayer.setInstrumentation(on);
@@ -873,8 +873,9 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    * リソースを破棄する
    */
   async destroy(): Promise<void> {
-    await this.dataLayer.destroy();
+    // 非同期の DB 切断を待つ前に、自動描画と画面上のイベント処理を止める。
     this.gpuLayer.destroy();
     this.labelLayer.destroy();
+    await this.dataLayer.destroy();
   }
 }

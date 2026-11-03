@@ -1,4 +1,3 @@
-import { DEFAULT_VISIBLE_POINT_LIMIT } from '../constants.js';
 import { WebGPUContext } from './webgpu-context.js';
 import {
   gpuErrorMessage,
@@ -26,6 +25,8 @@ import type {
   FrameStats,
   ScatterPlotError,
 } from '../types.js';
+import { AdaptiveLodController, LodViewMotion } from './adaptive-lod.js';
+import { GpuFrameTimer, type GpuFrameSample } from './gpu-frame-timer.js';
 import { getLodSizeCutoff, type LodSizeDistribution } from '../data/lod.js';
 
 /** render uniform buffer サイズ（selection style + 受動クランプフィールドを含む, byte） */
@@ -36,6 +37,8 @@ const COMPOSITE_UNIFORM_SIZE = 16;
 const BRUSH_UNIFORM_SIZE = 80;
 /** count compute uniform buffer サイズ（byte） */
 const COUNT_UNIFORM_SIZE = 16;
+/** 校正が不安定な環境でも、操作後の自動再描画を有限回で止める。 */
+const MAX_REFINEMENT_FRAMES = 96;
 /** SelectionBrushMode → shader 内合成コード */
 const BRUSH_MODE_CODE: Record<SelectionBrushMode, number> = {
   replace: 0,
@@ -74,8 +77,8 @@ export interface GpuLayerOptions {
   canvas: HTMLCanvasElement;
   /** 背景色（デフォルト: 透明な黒） */
   backgroundColor?: Color4f;
-  /** 表示可能なポイントの最大数（デフォルト: 5000000） */
-  visiblePointLimit?: number;
+  /** 自動 LOD の目標 GPU 処理時間 (ms、既定 8)。 */
+  targetRenderTimeMs?: number;
   /** グローバル透明度 (0.0-1.0, デフォルト: 1.0) */
   pointAlpha?: number;
   /** グローバルサイズスケール (デフォルト: 1.0) */
@@ -217,8 +220,18 @@ export class GpuLayer {
   private totalPointCount: number = 0;
   /** 背景色 */
   private backgroundColor: Color4f = { r: 0, g: 0, b: 0, a: 0 };
-  /** 表示可能なポイントの最大数 */
-  private visiblePointLimit: number = DEFAULT_VISIBLE_POINT_LIMIT;
+  /** 目標時間に合わせて、点を残す割合を自動調整する。 */
+  private readonly adaptiveLod: AdaptiveLodController;
+  private frameTimer: GpuFrameTimer | null = null;
+  /** データや目標時間が変わった後に、以前の計測を適用しないための世代。 */
+  private timingGeneration = 0;
+  private renderTimeMs: number | null = null;
+  private renderTimeSource: FrameStats['renderTimeSource'] = null;
+  private refinementFrame: number | null = null;
+  private refinementTimeout: ReturnType<typeof setTimeout> | null = null;
+  private readonly viewMotion = new LodViewMotion();
+  private refinementFramesRemaining = 0;
+  private needsTimingSample = false;
   private disposed = false;
   /** フィルタリング結果が有効かどうか */
   private filterResultValid: boolean = false;
@@ -238,7 +251,7 @@ export class GpuLayer {
   /** 選択点が0でも選択 dim を強制するか（ブラシ操作開始時に背景を即 dim する用） */
   private forceSelectionActive = false;
 
-  // 診断用の CPU・FPS・描画件数。setInstrumentation(true) で計測する。
+  // 診断用の CPU・FPS・描画件数。自動 LOD 用の時間計測は、この設定と独立して動作する。
   private instrument = false;
   private statPrevRenderTs = 0;
   private statFps = 0;
@@ -248,7 +261,6 @@ export class GpuLayer {
   private statCpuMs = 0;
   private statGpuComputeMs = 0;
   private statGpuIdleMs = 0;
-  private statGpuInFlight = false;
   private statDrawnInFlight = false;
   private statDrawnStatus: FrameStats['drawnCountStatus'] = 'pending';
 
@@ -260,7 +272,7 @@ export class GpuLayer {
     this.canvas = options.canvas;
     this.context = new WebGPUContext(options.onError);
     this.backgroundColor = options.backgroundColor ?? { r: 0, g: 0, b: 0, a: 0 };
-    this.visiblePointLimit = options.visiblePointLimit ?? DEFAULT_VISIBLE_POINT_LIMIT;
+    this.adaptiveLod = new AdaptiveLodController(options.targetRenderTimeMs);
     this.pointAlpha = Math.max(0, Math.min(1, options.pointAlpha ?? 1.0));
     this.pointSizeScale = Math.max(0.01, options.pointSizeScale ?? 1.0);
     this.selectionStyle = this.resolveSelectionStyle(options.selectionStyle);
@@ -282,9 +294,14 @@ export class GpuLayer {
    * @param initialData 初期データ
    */
   async initialize(initialData: AllPointsData): Promise<void> {
+    this.cancelRefinement();
     this.disposed = false;
-    this.statGpuInFlight = false;
+    this.timingGeneration++;
+    this.frameTimer?.destroy();
+    this.adaptiveLod.reset();
+    this.viewMotion.reset();
     await this.context.initialize(this.canvas);
+    this.frameTimer = new GpuFrameTimer(this.context.device!);
     await this.createPipelines();
     await this.createBuffers(initialData);
     this.createBindGroups();
@@ -781,6 +798,8 @@ export class GpuLayer {
   uploadAllPoints(data: AllPointsData): void {
     if (!this.context.device) return;
 
+    this.invalidateTiming();
+
     const newTotalCount = data.totalCount;
     const countChanged = newTotalCount !== this.totalPointCount;
 
@@ -874,49 +893,10 @@ export class GpuLayer {
   }
 
   /**
-   * LOD閾値を計算する
-   * ズームレベルに応じて表示するポイント数を制限する
+   * 計測から決めた保持率を、固定ハッシュと比較する u32 の閾値に変換する。
    */
   private calculateLodThreshold(): number {
-    // 画面上に表示する最大ポイント数の目標値
-    let targetPoints = this.visiblePointLimit;
-
-    // ズームアウト（zoom < 1.0）時は、画面内に大量の点が密集するため、
-    // 重なり合いによるフラグメントシェーダーの過負荷を防ぐため目標点数を減らす。
-    if (this.zoom < 1.0) {
-      targetPoints = Math.floor(this.visiblePointLimit * Math.pow(this.zoom, 0.6));
-      // 最低限の分布が見えるライン（visiblePointLimitの10%）
-      targetPoints = Math.max(Math.floor(this.visiblePointLimit * 0.1), targetPoints);
-    }
-
-    // 全ポイント数が目標以下なら常に全表示（フィルタリング不要）
-    if (this.totalPointCount <= targetPoints) {
-      return 0xffffffff;
-    }
-
-    // ズームレベルに基づく表示領域の割合（概算）
-    // zoom=1.0を一単位として、ズームするほど表示範囲は狭くなる
-    const visibleAreaFraction = 1.0 / (this.zoom * this.zoom);
-
-    // その領域に含まれると予想されるポイント数
-    const expectedPointsInView = Math.min(
-      this.totalPointCount,
-      this.totalPointCount * visibleAreaFraction
-    );
-
-    // 目標内なら間引きなし
-    if (expectedPointsInView <= targetPoints) {
-      return 0xffffffff;
-    }
-
-    // 目標点数に抑えるための維持率 (Keep Ratio)
-    let keepRatio = targetPoints / expectedPointsInView;
-
-    // 1.0（全表示）を超えないようにクランプ
-    keepRatio = Math.min(1.0, keepRatio);
-
-    // u32の最大値に対する閾値を計算
-    return Math.floor(0xffffffff * keepRatio);
+    return Math.floor(0xffffffff * this.adaptiveLod.keepRatio);
   }
 
   /**
@@ -1133,7 +1113,17 @@ export class GpuLayer {
 
   render(): void {
     if (this.disposed) return;
+    // 外部から描画を要求されたら再調整を許す。静止後の自動描画は有限回で止める。
+    this.refinementFramesRemaining = MAX_REFINEMENT_FRAMES;
+    if (this.refinementFrame !== null) cancelAnimationFrame(this.refinementFrame);
+    this.refinementFrame = null;
+    this.renderFrame();
+    if (this.viewMotion.delay(performance.now()) > 0) this.requestRefinementRender();
+  }
+
+  private renderFrame(): void {
     if (
+      this.disposed ||
       !this.context.device ||
       !this.context.context ||
       !this.filterPipeline ||
@@ -1169,74 +1159,128 @@ export class GpuLayer {
 
     const isGrayed = this.filteredPointDisplayMode === 'grayed';
     const commandEncoder = this.context.device.createCommandEncoder();
+    const sample = this.frameTimer?.beginFrame();
+    const sampledKeepRatio = this.adaptiveLod.keepRatio;
+    const timingGeneration = this.timingGeneration;
+    const allowLodAdjustment = this.viewMotion.delay(performance.now()) === 0;
+    let submitted = false;
 
-    if (!this.filterResultValid) {
-      _computeRan = true;
-      this.context.device.queue.writeBuffer(this.atomicCounterBuffer, 0, new Uint32Array([0]));
-      this.context.device.queue.writeBuffer(this.filteredCounterBuffer, 0, new Uint32Array([0]));
+    try {
+      if (!this.filterResultValid) {
+        _computeRan = true;
+        this.context.device.queue.writeBuffer(this.atomicCounterBuffer, 0, new Uint32Array([0]));
+        this.context.device.queue.writeBuffer(this.filteredCounterBuffer, 0, new Uint32Array([0]));
 
-      {
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(this.filterPipeline);
-        computePass.setBindGroup(0, this.filterBindGroup);
-        const workgroupCount = Math.ceil(this.totalPointCount / 256);
-        computePass.dispatchWorkgroups(workgroupCount);
-        computePass.end();
-      }
-
-      // 可視ポイント用Indirect Buffer更新
-      {
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(this.updateIndirectPipeline);
-        computePass.setBindGroup(0, this.updateIndirectBindGroup);
-        computePass.dispatchWorkgroups(1);
-        computePass.end();
-      }
-
-      // フィルター済みポイント用Indirect Buffer更新
-      if (isGrayed) {
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(this.updateIndirectPipeline);
-        computePass.setBindGroup(0, this.filteredUpdateIndirectBindGroup);
-        computePass.dispatchWorkgroups(1);
-        computePass.end();
-      }
-
-      this.filterResultValid = true;
-    }
-
-    if (this.recededClampEnabled && this.ensureOffscreen()) {
-      // ── 受動層クランプ: 受動(dim/gray)をオフスクリーンに通常累積 → 合成時に alpha 頭打ち → 焦点を上に ──
-      // 1) 受動層（renderMode=1）をオフスクリーン（透明クリア）に累積描画。
-      {
-        const offPass = commandEncoder.beginRenderPass({
-          colorAttachments: [
-            {
-              view: this.offscreenTexture!.createView(),
-              clearValue: { r: 0, g: 0, b: 0, a: 0 },
-              loadOp: 'clear',
-              storeOp: 'store',
-            },
-          ],
-        });
-        offPass.setPipeline(this.renderPipeline);
-        offPass.setVertexBuffer(0, this.quadVertexBuffer);
-        offPass.setIndexBuffer(this.indexBuffer!, 'uint16');
-        // 時間フィルタの灰色層（grayedMode=1）も受動なので、ここで累積してクランプ対象にする
-        // （main へ直接描くと composite を迂回し、密集で不透明化してしまう）。背面なので先に描く。
-        if (isGrayed) {
-          offPass.setBindGroup(0, this.filteredRenderBindGroup);
-          offPass.drawIndexedIndirect(this.filteredIndirectBuffer, 0);
+        {
+          const computePass = commandEncoder.beginComputePass({
+            timestampWrites: sample?.querySet
+              ? { querySet: sample.querySet, beginningOfPassWriteIndex: 0 }
+              : undefined,
+          });
+          computePass.setPipeline(this.filterPipeline);
+          computePass.setBindGroup(0, this.filterBindGroup);
+          const workgroupCount = Math.ceil(this.totalPointCount / 256);
+          computePass.dispatchWorkgroups(workgroupCount);
+          computePass.end();
         }
-        // 通常 visible のうち受動（renderMode=1 で焦点を discard）を累積。
-        offPass.setBindGroup(0, this.recededRenderBindGroup!);
-        offPass.drawIndexedIndirect(this.indirectBuffer, 0);
-        offPass.end();
+
+        // 可視ポイント用Indirect Buffer更新
+        {
+          const computePass = commandEncoder.beginComputePass();
+          computePass.setPipeline(this.updateIndirectPipeline);
+          computePass.setBindGroup(0, this.updateIndirectBindGroup);
+          computePass.dispatchWorkgroups(1);
+          computePass.end();
+        }
+
+        // フィルター済みポイント用Indirect Buffer更新
+        if (isGrayed) {
+          const computePass = commandEncoder.beginComputePass();
+          computePass.setPipeline(this.updateIndirectPipeline);
+          computePass.setBindGroup(0, this.filteredUpdateIndirectBindGroup);
+          computePass.dispatchWorkgroups(1);
+          computePass.end();
+        }
+
+        this.filterResultValid = true;
       }
-      // 2) main: 背景クリア → 受動層(時間フィルタ灰色＋dim/gray を累積済み)を clamp 合成 → 焦点層(renderMode=2)。
-      {
+
+      if (this.recededClampEnabled && this.ensureOffscreen()) {
+        // ── 受動層クランプ: 受動(dim/gray)をオフスクリーンに通常累積 → 合成時に alpha 頭打ち → 焦点を上に ──
+        // 1) 受動層（renderMode=1）をオフスクリーン（透明クリア）に累積描画。
+        {
+          const offPass = commandEncoder.beginRenderPass({
+            timestampWrites:
+              sample?.querySet && !_computeRan
+                ? { querySet: sample.querySet, beginningOfPassWriteIndex: 0 }
+                : undefined,
+            colorAttachments: [
+              {
+                view: this.offscreenTexture!.createView(),
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                loadOp: 'clear',
+                storeOp: 'store',
+              },
+            ],
+          });
+          offPass.setPipeline(this.renderPipeline);
+          offPass.setVertexBuffer(0, this.quadVertexBuffer);
+          offPass.setIndexBuffer(this.indexBuffer!, 'uint16');
+          // 時間フィルタの灰色層（grayedMode=1）も受動なので、ここで累積してクランプ対象にする
+          // （main へ直接描くと composite を迂回し、密集で不透明化してしまう）。背面なので先に描く。
+          if (isGrayed) {
+            offPass.setBindGroup(0, this.filteredRenderBindGroup);
+            offPass.drawIndexedIndirect(this.filteredIndirectBuffer, 0);
+          }
+          // 通常 visible のうち受動（renderMode=1 で焦点を discard）を累積。
+          offPass.setBindGroup(0, this.recededRenderBindGroup!);
+          offPass.drawIndexedIndirect(this.indirectBuffer, 0);
+          offPass.end();
+        }
+        // 2) main: 背景クリア → 受動層(時間フィルタ灰色＋dim/gray を累積済み)を clamp 合成 → 焦点層(renderMode=2)。
+        {
+          const textureView = this.context.context.getCurrentTexture().createView();
+          const mainPass = commandEncoder.beginRenderPass({
+            timestampWrites: sample?.querySet
+              ? { querySet: sample.querySet, endOfPassWriteIndex: 1 }
+              : undefined,
+            colorAttachments: [
+              {
+                view: textureView,
+                clearValue: {
+                  r: this.backgroundColor.r,
+                  g: this.backgroundColor.g,
+                  b: this.backgroundColor.b,
+                  a: this.backgroundColor.a,
+                },
+                loadOp: 'clear',
+                storeOp: 'store',
+              },
+            ],
+          });
+          // 受動層オフスクリーン（時間フィルタ灰色＋dim/gray を累積済み）を clamp 合成（フルスクリーン三角形）。
+          mainPass.setPipeline(this.compositePipeline!);
+          mainPass.setBindGroup(0, this.compositeBindGroup!);
+          mainPass.draw(3);
+          // 焦点層（renderMode=2 で受動を discard）。
+          mainPass.setPipeline(this.renderPipeline);
+          mainPass.setVertexBuffer(0, this.quadVertexBuffer);
+          mainPass.setIndexBuffer(this.indexBuffer!, 'uint16');
+          mainPass.setBindGroup(0, this.renderBindGroup);
+          mainPass.drawIndexedIndirect(this.indirectBuffer, 0);
+          mainPass.end();
+        }
+      } else {
+        // ── 従来の単一パス（受動クランプ無効＝後方互換）──
         const textureView = this.context.context.getCurrentTexture().createView();
-        const mainPass = commandEncoder.beginRenderPass({
+        const renderPass = commandEncoder.beginRenderPass({
+          timestampWrites: sample?.querySet
+            ? {
+                querySet: sample.querySet,
+                beginningOfPassWriteIndex: _computeRan ? undefined : 0,
+                endOfPassWriteIndex: 1,
+              }
+            : undefined,
           colorAttachments: [
             {
               view: textureView,
@@ -1251,103 +1295,185 @@ export class GpuLayer {
             },
           ],
         });
-        // 受動層オフスクリーン（時間フィルタ灰色＋dim/gray を累積済み）を clamp 合成（フルスクリーン三角形）。
-        mainPass.setPipeline(this.compositePipeline!);
-        mainPass.setBindGroup(0, this.compositeBindGroup!);
-        mainPass.draw(3);
-        // 焦点層（renderMode=2 で受動を discard）。
-        mainPass.setPipeline(this.renderPipeline);
-        mainPass.setVertexBuffer(0, this.quadVertexBuffer);
-        mainPass.setIndexBuffer(this.indexBuffer!, 'uint16');
-        mainPass.setBindGroup(0, this.renderBindGroup);
-        mainPass.drawIndexedIndirect(this.indirectBuffer, 0);
-        mainPass.end();
+
+        renderPass.setPipeline(this.renderPipeline);
+        renderPass.setVertexBuffer(0, this.quadVertexBuffer);
+        renderPass.setIndexBuffer(this.indexBuffer!, 'uint16');
+
+        // フィルター済みポイント（灰色）を先に描画（背面）
+        if (isGrayed) {
+          renderPass.setBindGroup(0, this.filteredRenderBindGroup);
+          renderPass.drawIndexedIndirect(this.filteredIndirectBuffer, 0);
+        }
+
+        // 通常ポイントを描画（前面）
+        renderPass.setBindGroup(0, this.renderBindGroup);
+        renderPass.drawIndexedIndirect(this.indirectBuffer, 0);
+        renderPass.end();
       }
-    } else {
-      // ── 従来の単一パス（受動クランプ無効＝後方互換）──
-      const textureView = this.context.context.getCurrentTexture().createView();
-      const renderPass = commandEncoder.beginRenderPass({
-        colorAttachments: [
-          {
-            view: textureView,
-            clearValue: {
-              r: this.backgroundColor.r,
-              g: this.backgroundColor.g,
-              b: this.backgroundColor.b,
-              a: this.backgroundColor.a,
-            },
-            loadOp: 'clear',
-            storeOp: 'store',
-          },
-        ],
+
+      sample?.resolve(commandEncoder);
+      const submittedAt = performance.now();
+      this.context.device.queue.submit([commandEncoder.finish()]);
+      submitted = true;
+      if (_computeRan) this.needsTimingSample = !sample;
+      if (sample) {
+        this.recordFrameTime(
+          sample,
+          submittedAt,
+          _computeRan,
+          sampledKeepRatio,
+          timingGeneration,
+          allowLodAdjustment
+        );
+      }
+
+      if (this.instrument) {
+        this.statCpuMs = performance.now() - _instrT0;
+        this.statComputeRan = _computeRan;
+        // processed は compute が走ったフレームの値だけ保持（idle で 0 に戻さない＝sticky）。
+        // 静止状態でオーバーレイを読んでも直近の重いフレームの走査点数が見える。
+        if (_computeRan) this.statProcessed = this.totalPointCount;
+        // 描画点数の読み戻し（compute が走ったフレームのみ・throttle・sticky）
+        if (_computeRan && !this.statDrawnInFlight) {
+          void this.readDrawnCount();
+        }
+      }
+    } finally {
+      // エンコードや submit が同期的に失敗した場合も、計測スロットを占有したままにしない。
+      if (!submitted) {
+        sample?.cancel();
+        this.filterResultValid = false;
+      }
+    }
+  }
+
+  private recordFrameTime(
+    sample: GpuFrameSample,
+    submittedAt: number,
+    wasCompute: boolean,
+    sampledKeepRatio: number,
+    timingGeneration: number,
+    allowLodAdjustment: boolean
+  ): void {
+    void sample
+      .read(submittedAt)
+      .then((ms) => {
+        if (this.disposed || !this.context.device) return;
+        if (
+          timingGeneration !== this.timingGeneration ||
+          sampledKeepRatio !== this.adaptiveLod.keepRatio
+        ) {
+          if (this.needsTimingSample) this.requestRefinementRender();
+          return;
+        }
+        if (ms === undefined || !Number.isFinite(ms) || ms < 0) {
+          if (wasCompute || this.needsTimingSample) this.requestRefinementRender();
+          return;
+        }
+        if (!wasCompute) {
+          this.statGpuIdleMs = ms;
+          // 軽い描画がスロットを占有していた間に、重い更新の計測が省略された場合は再試行する。
+          if (this.needsTimingSample) this.requestRefinementRender();
+          return;
+        }
+
+        this.statGpuComputeMs = ms;
+        this.renderTimeMs = ms;
+        this.renderTimeSource = sample.source;
+        // 最後の自動描画後に、画面へ反映できない次の保持率だけを設定しない。
+        if (this.refinementFramesRemaining <= 0) return;
+        // 移動中に始めた計測は、停止後に遅れて届いても保持率の調整に使わない。
+        if (!allowLodAdjustment || this.viewMotion.delay(performance.now()) > 0) {
+          this.needsTimingSample = true;
+          this.requestRefinementRender();
+          return;
+        }
+        // compute を省略したホバー等の軽い描画を根拠に、保持率を上げ続けない。
+        const adjustment = this.adaptiveLod.observe(ms, sampledKeepRatio, performance.now());
+        if (adjustment.changed) this.updateUniforms();
+        if (adjustment.changed || adjustment.needsMoreSamples || this.needsTimingSample) {
+          this.requestRefinementRender(adjustment.retryAfterMs);
+        }
+      })
+      .catch((error: unknown) => {
+        if (this.disposed || !this.context.device || timingGeneration !== this.timingGeneration)
+          return;
+        this.context.reportError(
+          createError(
+            sample.source === 'timestamp-query' ? 'GPU_READBACK_FAILED' : 'GPU_QUEUE_FAILED',
+            `Frame timing failed: ${gpuErrorMessage(error)}`,
+            {
+              cause: error instanceof Error ? error : undefined,
+              context: { operation: 'frame-timing', source: sample.source, computeRan: wasCompute },
+            }
+          )
+        );
+        // GPU 時刻の読み戻しに失敗した後は、タイマーが切り替えたキュー方式で再計測する。
+        if (sample.source === 'timestamp-query') this.requestRefinementRender();
       });
+  }
 
-      renderPass.setPipeline(this.renderPipeline);
-      renderPass.setVertexBuffer(0, this.quadVertexBuffer);
-      renderPass.setIndexBuffer(this.indexBuffer!, 'uint16');
-
-      // フィルター済みポイント（灰色）を先に描画（背面）
-      if (isGrayed) {
-        renderPass.setBindGroup(0, this.filteredRenderBindGroup);
-        renderPass.drawIndexedIndirect(this.filteredIndirectBuffer, 0);
-      }
-
-      // 通常ポイントを描画（前面）
-      renderPass.setBindGroup(0, this.renderBindGroup);
-      renderPass.drawIndexedIndirect(this.indirectBuffer, 0);
-      renderPass.end();
+  private requestRefinementRender(delayMs = 0): void {
+    if (
+      this.disposed ||
+      this.refinementFrame !== null ||
+      this.refinementTimeout !== null ||
+      this.refinementFramesRemaining <= 0
+    )
+      return;
+    const delay = Math.max(delayMs, this.viewMotion.delay(performance.now()));
+    if (delay > 0) {
+      this.refinementTimeout = setTimeout(() => {
+        this.refinementTimeout = null;
+        this.requestRefinementRender();
+      }, Math.ceil(delay));
+      return;
     }
-
-    this.context.device.queue.submit([commandEncoder.finish()]);
-
-    if (this.instrument) {
-      this.statCpuMs = performance.now() - _instrT0;
-      this.statComputeRan = _computeRan;
-      // processed は compute が走ったフレームの値だけ保持（idle で 0 に戻さない＝sticky）。
-      // 静止状態でオーバーレイを読んでも直近の重いフレームの走査点数が見える。
-      if (_computeRan) this.statProcessed = this.totalPointCount;
-      // GPU 完了時間（前回の計測が未解決ならスキップ＝throttle）。compute/idle を分けて保持し、
-      // 差分（compute - idle）でフィルタ全点走査のコストを切り出せるようにする。
-      if (!this.statGpuInFlight) {
-        this.statGpuInFlight = true;
-        const tSubmit = performance.now();
-        const wasCompute = _computeRan;
-        const device = this.context.device;
-        device.queue
-          .onSubmittedWorkDone()
-          .then(() => {
-            if (this.context.device !== device) return;
-            const ms = performance.now() - tSubmit;
-            if (wasCompute) this.statGpuComputeMs = ms;
-            else this.statGpuIdleMs = ms;
-            this.statGpuInFlight = false;
-          })
-          .catch((error: unknown) => {
-            if (this.context.device !== device) return;
-            this.statGpuInFlight = false;
-            this.context.reportError(
-              createError(
-                'GPU_QUEUE_FAILED',
-                'GPU queue completion failed: ' + gpuErrorMessage(error),
-                {
-                  cause: error instanceof Error ? error : undefined,
-                  context: { operation: 'frame-timing' },
-                }
-              )
-            );
-          });
+    this.refinementFrame = requestAnimationFrame(() => {
+      this.refinementFrame = null;
+      if (this.disposed) return;
+      if (this.viewMotion.delay(performance.now()) > 0) {
+        this.requestRefinementRender();
+        return;
       }
-      // 描画点数の読み戻し（compute が走ったフレームのみ・throttle・sticky）
-      if (_computeRan && !this.statDrawnInFlight) {
-        void this.readDrawnCount();
-      }
-    }
+      this.refinementFramesRemaining--;
+      // 初期校正や保持率変更後も、絞り込みを含む同じ処理を計測する。
+      this.filterResultValid = false;
+      this.renderFrame();
+    });
+  }
+
+  private invalidateTiming(): void {
+    this.cancelRefinement();
+    this.timingGeneration++;
+    this.adaptiveLod.invalidateMeasurements();
+    this.renderTimeMs = null;
+    this.renderTimeSource = null;
+    this.needsTimingSample = true;
+  }
+
+  private cancelRefinement(): void {
+    if (this.refinementFrame !== null) cancelAnimationFrame(this.refinementFrame);
+    if (this.refinementTimeout !== null) clearTimeout(this.refinementTimeout);
+    this.refinementFrame = null;
+    this.refinementTimeout = null;
+  }
+
+  private noteViewMotion(): void {
+    this.cancelRefinement();
+    this.viewMotion.moved(performance.now());
+    this.timingGeneration++;
+    // 移動だけでは、直前の保持率更新からの 500 ms の待機を解除しない。
+    this.adaptiveLod.invalidateMeasurements(true);
+    this.needsTimingSample = true;
   }
 
   /**
    * キャンバスをリサイズし、ビューポートを更新する
    */
   resize(width: number, height: number): void {
+    this.invalidateTiming();
     this.canvas.width = width;
     this.canvas.height = height;
     this.updateUniforms();
@@ -1357,7 +1483,10 @@ export class GpuLayer {
    * ズームレベルを設定する
    */
   setZoom(zoom: number): void {
-    this.zoom = Math.max(0.01, Math.min(100, zoom));
+    const clampedZoom = Math.max(0.01, Math.min(100, zoom));
+    if (clampedZoom === this.zoom) return;
+    this.noteViewMotion();
+    this.zoom = clampedZoom;
     this.updateUniforms();
   }
 
@@ -1372,6 +1501,8 @@ export class GpuLayer {
    * パンオフセットを設定する
    */
   setPan(x: number, y: number): void {
+    if (x === this.panX && y === this.panY) return;
+    this.noteViewMotion();
     this.panX = x;
     this.panY = y;
     this.updateUniforms();
@@ -1389,6 +1520,8 @@ export class GpuLayer {
    */
   zoomToPoint(newZoom: number, screenX: number, screenY: number): void {
     const clampedZoom = Math.max(0.01, Math.min(100, newZoom));
+    if (clampedZoom === this.zoom) return;
+    this.noteViewMotion();
     const aspectRatio = this.canvas.width / this.canvas.height;
 
     const ndcX = (screenX / this.canvas.width) * 2 - 1;
@@ -1414,10 +1547,12 @@ export class GpuLayer {
     if (options.backgroundColor !== undefined) {
       this.backgroundColor = options.backgroundColor;
     }
-    if (options.visiblePointLimit !== undefined) {
-      this.visiblePointLimit = options.visiblePointLimit;
-      // LOD閾値が変わるのでフィルタ結果を無効化
-      this.filterResultValid = false;
+    if (
+      options.targetRenderTimeMs !== undefined &&
+      options.targetRenderTimeMs !== this.adaptiveLod.targetRenderTimeMs
+    ) {
+      this.adaptiveLod.setTargetRenderTimeMs(options.targetRenderTimeMs);
+      this.invalidateTiming();
       needsUniformUpdate = true;
     }
     if (options.pointAlpha !== undefined) {
@@ -1759,7 +1894,7 @@ export class GpuLayer {
   }
 
   /**
-   * フレーム計測の ON/OFF（dev/デバッグ用）。OFF 時は render() に追加コストを掛けない。
+   * 診断用の CPU・FPS・描画件数計測の ON/OFF。自動 LOD の時間計測は停止しない。
    */
   setInstrumentation(on: boolean): void {
     this.instrument = on;
@@ -1770,8 +1905,7 @@ export class GpuLayer {
   }
 
   /**
-   * 直近フレームの計測値を返す（dev/デバッグ用）。fps/cpuEncodeMs/gpuTotalMs/computeRan は直近 render()
-   * の値、drawnCount は非同期読み戻しのため数フレーム遅れる throttled サンプル。
+   * 診断値と自動 LOD の現在値を返す。時間と描画件数は非同期で取得するため、数フレーム遅れる。
    */
   getFrameStats(): FrameStats {
     return {
@@ -1782,7 +1916,10 @@ export class GpuLayer {
       drawnCount: this.statDrawn,
       drawnCountStatus: this.statDrawnStatus,
       totalPointCount: this.totalPointCount,
-      pointBudget: this.visiblePointLimit,
+      targetRenderTimeMs: this.adaptiveLod.targetRenderTimeMs,
+      lodKeepRatio: this.adaptiveLod.keepRatio,
+      renderTimeMs: this.renderTimeMs,
+      renderTimeSource: this.renderTimeSource,
       cpuEncodeMs: Math.round(this.statCpuMs * 100) / 100,
       gpuComputeMs: Math.round(this.statGpuComputeMs * 100) / 100,
       gpuIdleMs: Math.round(this.statGpuIdleMs * 100) / 100,
@@ -1827,7 +1964,7 @@ export class GpuLayer {
     const textureBytes = this.offscreenTexture
       ? this.offscreenTexture.width * this.offscreenTexture.height * 4
       : 0;
-    return bufferBytes + textureBytes;
+    return bufferBytes + textureBytes + (this.frameTimer?.allocatedBufferBytes ?? 0);
   }
 
   /** 描画点数（atomicCounter = visibleIndices 件数）を非同期読み戻し（計測用・throttle）。 */
@@ -1961,6 +2098,12 @@ export class GpuLayer {
    */
   destroy(): void {
     this.disposed = true;
+    this.timingGeneration++;
+    this.cancelRefinement();
+    this.viewMotion.reset();
+    this.refinementFramesRemaining = 0;
+    this.frameTimer?.destroy();
+    this.frameTimer = null;
     for (const buffer of this.readbackBuffers) buffer.destroy();
     this.readbackBuffers.clear();
     this.quadVertexBuffer?.destroy();

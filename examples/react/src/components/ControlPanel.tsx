@@ -5,7 +5,7 @@ import { ColorExpressionInput } from './ColorExpressionInput';
 import { SearchBox } from './SearchBox';
 import { FilteredPointModeSelector } from './FilteredPointModeSelector';
 import { LabelFilterInput } from './LabelFilterInput';
-import { PointLimitSlider } from './PointLimitSlider';
+import { TargetRenderTimeSlider } from './TargetRenderTimeSlider';
 import { StatsDisplay } from './StatsDisplay';
 import { HoverControlPanel } from './HoverControlPanel';
 import { TimeFilterSlider } from './TimeFilterSlider';
@@ -17,7 +17,7 @@ export function ControlPanel() {
         <h2 className="text-lg font-semibold text-zinc-800">Controls</h2>
         <StatsDisplay />
       </div>
-      <PointLimitSlider />
+      <TargetRenderTimeSlider />
       <PointAlphaSlider />
       <PointSizeScaleSlider />
       <LabelFontSizeSlider />

@@ -123,7 +123,7 @@ interface ScatterPlotContextValue {
   updateColorMode: (mode: PointColorMode) => Promise<void>;
   updatePointColor: (color: string) => Promise<void>;
   updateSearch: (searchText: string) => Promise<void>;
-  updatePointLimit: (limit: number) => Promise<void>;
+  updateTargetRenderTime: (milliseconds: number) => Promise<void>;
   updateLabelFilter: (searchText: string) => void;
   /** GPU側で時間範囲フィルターを適用 */
   updateTimeFilter: (min: number | null, max: number | null) => Promise<void>;
@@ -172,7 +172,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     colorSql: string;
     colorMode: PointColorMode;
     pointColor: string;
-    visiblePointLimit: number;
+    targetRenderTimeMs: number;
     labelFontSize: number;
     timeRangeFilter: { min: number | null; max: number | null };
   }>({
@@ -181,7 +181,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     colorSql: buildSingleColorSql(DEFAULT_POINT_COLOR),
     colorMode: 'cluster',
     pointColor: DEFAULT_POINT_COLOR,
-    visiblePointLimit: 100000,
+    targetRenderTimeMs: 8,
     labelFontSize: DEFAULT_LABEL_FONT_SIZE,
     timeRangeFilter: { min: null, max: null },
   });
@@ -210,9 +210,9 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
       data: {
         sizeSql: filtersRef.current.sizeSql,
         colorSql: filtersRef.current.colorSql,
-        visiblePointLimit: filtersRef.current.visiblePointLimit,
       },
       gpu: {
+        targetRenderTimeMs: filtersRef.current.targetRenderTimeMs,
         backgroundColor: { r: 0.85, g: 0.85, b: 0.85, a: 1.0 },
       },
       labels: {
@@ -356,22 +356,11 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     [buildWhereConditions]
   );
 
-  const updatePointLimit = useCallback(
-    async (limit: number) => {
-      if (!plotRef.current) return;
-      filtersRef.current.visiblePointLimit = limit;
-      await plotRef.current.update({
-        data: {
-          sizeSql: filtersRef.current.sizeSql,
-          colorSql: filtersRef.current.colorSql,
-          visiblePointLimit: limit,
-          whereConditions: buildWhereConditions(),
-        },
-      });
-      plotRef.current.render();
-    },
-    [buildWhereConditions]
-  );
+  const updateTargetRenderTime = useCallback(async (milliseconds: number) => {
+    // 利用者が選んだ時間目標を初期化設定にも保持する。
+    filtersRef.current.targetRenderTimeMs = milliseconds;
+    await plotRef.current?.update({ gpu: { targetRenderTimeMs: milliseconds } });
+  }, []);
 
   // ホバーの操作
   const setPointHover = useCallback(async (pointId: number): Promise<boolean> => {
@@ -526,7 +515,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
         updateColorMode,
         updatePointColor,
         updateSearch,
-        updatePointLimit,
+        updateTargetRenderTime,
         updateLabelFilter,
         updateTimeFilter,
         updatePointAlpha,

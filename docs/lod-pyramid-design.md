@@ -13,7 +13,7 @@
 - サイズ境界方式への変更は現在の作業ツリーを反映している。`lodPriority` 用の storage binding `8` は削除済みだが、uniform の slot `17`・`18`・`19` は `useSizeCutoff`・`sizeCutoff`・`tieHashThreshold` が使用している。本文の空き領域の想定は古い。
 - 選択点・ホバー強調点・フィルター一致点を LOD から除外する foreground 規則は未実装。
 - 今回の設計レビューでは、選択・ホバー強調による点本体の強制描画を採らず、通常の LOD・フィルター判定に従う方針を確認した（[ADR-0003](adr/0003-selection-independent-of-drawing.md)）。本文の foreground 案を再検討する場合は、この判断との差を扱う必要がある。
-- 現在の `visiblePointLimit` の既定値は `5_000_000`。読み込み点数の上限や、厳密な描画点数の上限ではない。
+- 現行は `gpu.targetRenderTimeMs`（既定 8 ms）に合わせて保持率を自動調整し、`visiblePointLimit` は廃止している。以下の本文にある点数予算の設定と密度推定は過去の前提であり、現行の契約とは扱わない。
 - `E:/duckscatter`、`scatterPlotConfig`、`useScatterPlot`、投稿一覧などは提案元の利用アプリの文脈を含む。本リポジトリの構成や一般的な利用契約とは区別する。
 
 以下の本文は提案時点の記録として残す。本文中の「採用」「不変条件」「検証済み」は、現行実装に対する承認や再検証を意味しない。

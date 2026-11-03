@@ -568,6 +568,19 @@ export class LabelLayer {
     if (!parent) return;
 
     parent.addEventListener('mousemove', (e: MouseEvent) => {
+      // ドラッグ中は移動先の点を次々にホバーしない。処理中の問い合わせも無効化して、
+      // 後から届く結果が輪郭やツールチップを表示し直すことを防ぐ。
+      if (e.buttons !== 0) {
+        if (
+          this.hoveredLabel !== null ||
+          this.hoveredPoint !== null ||
+          this.hoveredRowid !== null ||
+          this.hoverFetchQueued !== null
+        ) {
+          this.clearPointerHover();
+        }
+        return;
+      }
       const rect = this.labelCanvas.getBoundingClientRect();
       const scaleX = this.labelCanvas.width / rect.width;
       const scaleY = this.labelCanvas.height / rect.height;
@@ -714,27 +727,24 @@ export class LabelLayer {
     );
 
     parent.addEventListener('mouseleave', () => {
-      const hadLabel = this.hoveredLabel !== null;
-      const hadPoint = this.hoveredPoint !== null;
-
-      this.hoveredLabel = null;
-      this.hoveredPoint = null;
-      this.hoveredRowid = null;
-      this.hoverFetchQueued = null;
-      this.hoverQuerySeq++;
-
-      if (hadLabel && this.onLabelHover) {
-        this.onLabelHover(null);
-      }
-
-      if (hadPoint && this.onPointHover) {
-        this.onPointHover(null);
-      }
-
-      this.labelCanvas.style.pointerEvents = 'none';
-      this.labelCanvas.style.cursor = 'default';
-      this.render();
+      this.clearPointerHover();
     });
+  }
+
+  /** ポインター操作のホバー状態と、進行中・待機中の取得結果をまとめて解除する。 */
+  private clearPointerHover(): void {
+    const hadLabel = this.hoveredLabel !== null;
+    const hadPoint = this.hoveredPoint !== null;
+    this.hoveredLabel = null;
+    this.hoveredPoint = null;
+    this.hoveredRowid = null;
+    this.hoverFetchQueued = null;
+    this.hoverQuerySeq++;
+    if (hadLabel) this.onLabelHover?.(null);
+    if (hadPoint) this.onPointHover?.(null);
+    this.labelCanvas.style.pointerEvents = 'none';
+    this.labelCanvas.style.cursor = 'default';
+    this.render();
   }
 
   /**
