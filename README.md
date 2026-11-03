@@ -64,6 +64,8 @@ plot.render();
 
 `/points.parquet` には `x` / `y` を持つデータを配置してください。ローカルファイルを扱う場合は `dataUrl` の代わりに `dataFile: file`（`File` / `ArrayBuffer`）を指定できます。
 
+GPU の検証エラー・デバイス喪失・計測の読み戻し失敗も同じ `error` イベントへ通知します。シェーダーのコンパイル失敗にはシェーダー名・行番号・該当ソースを含め、pipeline の作成失敗とは別のコードで識別します。`getFrameStats().drawnCountStatus` は `pending`・`ready`・`error` を返し、未計測や読み戻し失敗を実測の 0 件と区別します。
+
 ## データについて
 
 ### Parquetファイル

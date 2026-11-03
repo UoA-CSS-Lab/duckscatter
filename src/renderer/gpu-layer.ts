@@ -1,4 +1,11 @@
+import { DEFAULT_VISIBLE_POINT_LIMIT } from '../constants.js';
 import { WebGPUContext } from './webgpu-context.js';
+import {
+  gpuErrorMessage,
+  shaderCompilationError,
+  WebGPUInitializationError,
+} from './gpu-errors.js';
+import { createError } from '../errors.js';
 import {
   scatterVertexShader,
   filterComputeShader,
@@ -17,8 +24,8 @@ import type {
   ScreenBrushRect,
   BrushOptions,
   FrameStats,
+  ScatterPlotError,
 } from '../types.js';
-import { DEFAULT_VISIBLE_POINT_LIMIT } from '../constants.js';
 import { getLodSizeCutoff, type LodSizeDistribution } from '../data/lod.js';
 
 /** render uniform buffer サイズ（selection style + 受動クランプフィールドを含む, byte） */
@@ -77,6 +84,8 @@ export interface GpuLayerOptions {
   selectionStyle?: SelectionStyle;
   /** 受動層（dim/gray）のオーバードロークランプ */
   recededClamp?: RecededClampOptions;
+  /** 非同期の GPU エラーも利用側へ伝える。 */
+  onError?: (error: ScatterPlotError) => void;
 }
 
 // ビューポート境界のマージン（クリップ空間）
@@ -139,6 +148,8 @@ export class GpuLayer {
   private brushUniformBuffer: GPUBuffer | null = null;
   /** count compute 用 uniform バッファ */
   private countUniformBuffer: GPUBuffer | null = null;
+  /** 非同期の読み戻し中だけ保持する一時バッファ。終了・破棄時には計測対象から外す。 */
+  private readonly readbackBuffers = new Set<GPUBuffer>();
 
   /** フィルター済みポイントインデックスバッファ (Storage) */
   private filteredIndicesBuffer: GPUBuffer | null = null;
@@ -208,6 +219,7 @@ export class GpuLayer {
   private backgroundColor: Color4f = { r: 0, g: 0, b: 0, a: 0 };
   /** 表示可能なポイントの最大数 */
   private visiblePointLimit: number = DEFAULT_VISIBLE_POINT_LIMIT;
+  private disposed = false;
   /** フィルタリング結果が有効かどうか */
   private filterResultValid: boolean = false;
 
@@ -226,7 +238,7 @@ export class GpuLayer {
   /** 選択点が0でも選択 dim を強制するか（ブラシ操作開始時に背景を即 dim する用） */
   private forceSelectionActive = false;
 
-  // ── フレーム計測（dev-only。setInstrumentation(true) で有効化。OFF 時はゼロオーバーヘッド） ──
+  // 診断用の CPU・FPS・描画件数。setInstrumentation(true) で計測する。
   private instrument = false;
   private statPrevRenderTs = 0;
   private statFps = 0;
@@ -238,6 +250,7 @@ export class GpuLayer {
   private statGpuIdleMs = 0;
   private statGpuInFlight = false;
   private statDrawnInFlight = false;
+  private statDrawnStatus: FrameStats['drawnCountStatus'] = 'pending';
 
   /**
    * GpuLayerインスタンスを作成する
@@ -245,7 +258,7 @@ export class GpuLayer {
    */
   constructor(options: GpuLayerOptions) {
     this.canvas = options.canvas;
-    this.context = new WebGPUContext();
+    this.context = new WebGPUContext(options.onError);
     this.backgroundColor = options.backgroundColor ?? { r: 0, g: 0, b: 0, a: 0 };
     this.visiblePointLimit = options.visiblePointLimit ?? DEFAULT_VISIBLE_POINT_LIMIT;
     this.pointAlpha = Math.max(0, Math.min(1, options.pointAlpha ?? 1.0));
@@ -269,8 +282,10 @@ export class GpuLayer {
    * @param initialData 初期データ
    */
   async initialize(initialData: AllPointsData): Promise<void> {
+    this.disposed = false;
+    this.statGpuInFlight = false;
     await this.context.initialize(this.canvas);
-    this.createPipelines();
+    await this.createPipelines();
     await this.createBuffers(initialData);
     this.createBindGroups();
   }
@@ -278,36 +293,22 @@ export class GpuLayer {
   /**
    * パイプラインを作成する
    */
-  private createPipelines(): void {
-    if (!this.context.device) {
+  private async createPipelines(): Promise<void> {
+    const device = this.context.device;
+    if (!device) {
       throw new Error('WebGPU device not initialized');
     }
 
-    const filterShaderModule = this.context.device.createShaderModule({
-      code: filterComputeShader,
-    });
-    this.filterPipeline = this.context.device.createComputePipeline({
-      layout: 'auto',
-      compute: {
-        module: filterShaderModule,
-        entryPoint: 'main',
-      },
-    });
-
-    const updateIndirectShaderModule = this.context.device.createShaderModule({
-      code: updateIndirectShader,
-    });
-    this.updateIndirectPipeline = this.context.device.createComputePipeline({
-      layout: 'auto',
-      compute: {
-        module: updateIndirectShaderModule,
-        entryPoint: 'main',
-      },
-    });
-
-    const renderShaderModule = this.context.device.createShaderModule({
-      code: scatterVertexShader,
-    });
+    // 互いに独立したモジュールは並行して検査し、失敗したシェーダーの名前と行番号を残す。
+    const [filterModule, indirectModule, renderModule, compositeModule, brushModule, countModule] =
+      await Promise.all([
+        this.createShaderModule('point-visibility-filter', filterComputeShader),
+        this.createShaderModule('point-indirect-arguments', updateIndirectShader),
+        this.createShaderModule('point-render', scatterVertexShader),
+        this.createShaderModule('receded-composite', compositeShader),
+        this.createShaderModule('brush-selection', brushSelectionShader),
+        this.createShaderModule('selection-count', countSelectionShader),
+      ]);
 
     const quadVertexBufferLayout: GPUVertexBufferLayout = {
       arrayStride: 8,
@@ -321,15 +322,16 @@ export class GpuLayer {
       ],
     };
 
-    this.renderPipeline = this.context.device.createRenderPipeline({
+    const renderDescriptor: GPURenderPipelineDescriptor = {
+      label: 'point-render',
       layout: 'auto',
       vertex: {
-        module: renderShaderModule,
+        module: renderModule,
         entryPoint: 'vertexMain',
         buffers: [quadVertexBufferLayout],
       },
       fragment: {
-        module: renderShaderModule,
+        module: renderModule,
         entryPoint: 'fragmentMain',
         targets: [
           {
@@ -352,18 +354,16 @@ export class GpuLayer {
       primitive: {
         topology: 'triangle-list',
       },
-    });
+    };
 
     // 受動層クランプ用 composite パイプライン（オフスクリーンをサンプルし alpha を頭打ちにして合成）。
     // composite の出力は premultiplied なので blend は premultiplied-over（src=one）。
-    const compositeShaderModule = this.context.device.createShaderModule({
-      code: compositeShader,
-    });
-    this.compositePipeline = this.context.device.createRenderPipeline({
+    const compositeDescriptor: GPURenderPipelineDescriptor = {
+      label: 'receded-composite',
       layout: 'auto',
-      vertex: { module: compositeShaderModule, entryPoint: 'vertexMain' },
+      vertex: { module: compositeModule, entryPoint: 'vertexMain' },
       fragment: {
-        module: compositeShaderModule,
+        module: compositeModule,
         entryPoint: 'fragmentMain',
         targets: [
           {
@@ -376,29 +376,99 @@ export class GpuLayer {
         ],
       },
       primitive: { topology: 'triangle-list' },
-    });
-    this.compositeSampler = this.context.device.createSampler({
+    };
+
+    // 非同期 API は、無効な pipeline を後段へ渡さず、作成失敗を Promise の拒否で通知する。
+    [
+      this.filterPipeline,
+      this.updateIndirectPipeline,
+      this.renderPipeline,
+      this.compositePipeline,
+      this.brushSelectionPipeline,
+      this.countSelectionPipeline,
+    ] = await Promise.all([
+      this.createPipeline('point-visibility-filter', () =>
+        device.createComputePipelineAsync({
+          label: 'point-visibility-filter',
+          layout: 'auto',
+          compute: { module: filterModule, entryPoint: 'main' },
+        })
+      ),
+      this.createPipeline('point-indirect-arguments', () =>
+        device.createComputePipelineAsync({
+          label: 'point-indirect-arguments',
+          layout: 'auto',
+          compute: { module: indirectModule, entryPoint: 'main' },
+        })
+      ),
+      this.createPipeline('point-render', () => device.createRenderPipelineAsync(renderDescriptor)),
+      this.createPipeline('receded-composite', () =>
+        device.createRenderPipelineAsync(compositeDescriptor)
+      ),
+      this.createPipeline('brush-selection', () =>
+        device.createComputePipelineAsync({
+          label: 'brush-selection',
+          layout: 'auto',
+          compute: { module: brushModule, entryPoint: 'main' },
+        })
+      ),
+      this.createPipeline('selection-count', () =>
+        device.createComputePipelineAsync({
+          label: 'selection-count',
+          layout: 'auto',
+          compute: { module: countModule, entryPoint: 'main' },
+        })
+      ),
+    ]);
+    this.compositeSampler = device.createSampler({
       magFilter: 'nearest',
       minFilter: 'nearest',
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
     });
+  }
 
-    const brushShaderModule = this.context.device.createShaderModule({
-      code: brushSelectionShader,
-    });
-    this.brushSelectionPipeline = this.context.device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: brushShaderModule, entryPoint: 'main' },
-    });
+  /** コンパイル結果を取得し、警告だけのモジュールはそのまま利用する。 */
+  private async createShaderModule(label: string, code: string): Promise<GPUShaderModule> {
+    const device = this.context.device;
+    if (!device) throw new Error('WebGPU device not initialized');
+    try {
+      const module = device.createShaderModule({ label, code });
+      const info = await module.getCompilationInfo();
+      const error = shaderCompilationError(label, code, info.messages);
+      if (error) throw new WebGPUInitializationError(error);
+      return module;
+    } catch (error) {
+      if (error instanceof WebGPUInitializationError) throw error;
+      throw new WebGPUInitializationError(
+        createError(
+          'GPU_SHADER_FAILED',
+          `Shader creation failed [${label}]: ${gpuErrorMessage(error)}`,
+          {
+            cause: error instanceof Error ? error : undefined,
+            context: { shader: label },
+          }
+        )
+      );
+    }
+  }
 
-    const countShaderModule = this.context.device.createShaderModule({
-      code: countSelectionShader,
-    });
-    this.countSelectionPipeline = this.context.device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: countShaderModule, entryPoint: 'main' },
-    });
+  /** pipeline の検証・Metal 等へのコンパイル失敗を、名前と元のメッセージ付きで伝える。 */
+  private async createPipeline<T>(label: string, create: () => Promise<T>): Promise<T> {
+    try {
+      return await create();
+    } catch (error) {
+      throw new WebGPUInitializationError(
+        createError(
+          'GPU_PIPELINE_FAILED',
+          `Pipeline creation failed [${label}]: ${gpuErrorMessage(error)}`,
+          {
+            cause: error instanceof Error ? error : undefined,
+            context: { pipeline: label },
+          }
+        )
+      );
+    }
   }
 
   /**
@@ -419,6 +489,7 @@ export class GpuLayer {
 
     const pointsBufferSize = data.totalCount * 16;
     this.allPointsBuffer = this.context.device.createBuffer({
+      label: 'all-points',
       size: pointsBufferSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -432,17 +503,20 @@ export class GpuLayer {
 
     const indicesBufferSize = data.totalCount * 4;
     this.visibleIndicesBuffer = this.context.device.createBuffer({
+      label: 'visible-point-indices',
       size: indicesBufferSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX,
     });
 
     this.atomicCounterBuffer = this.context.device.createBuffer({
+      label: 'visible-point-count',
       size: 4,
       // COPY_SRC: 計測（readDrawnCount）が描画点数を atomicCounter から読み戻すために必要。
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
 
     this.indirectBuffer = this.context.device.createBuffer({
+      label: 'point-indirect-arguments',
       size: 20,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -497,6 +571,7 @@ export class GpuLayer {
 
     const filterColumnsBufferSize = Math.max(16, data.totalCount * 16);
     this.filterColumnsBuffer = this.context.device.createBuffer({
+      label: 'point-filter-columns',
       size: filterColumnsBufferSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -504,6 +579,7 @@ export class GpuLayer {
     // Visibility flags buffer: ceil(totalCount / 32) * 4 bytes (1 bit per point)
     const visibilityFlagsSize = Math.max(4, Math.ceil(data.totalCount / 32) * 4);
     this.visibilityFlagsBuffer = this.context.device.createBuffer({
+      label: 'where-visibility-flags',
       size: visibilityFlagsSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -1056,6 +1132,7 @@ export class GpuLayer {
   }
 
   render(): void {
+    if (this.disposed) return;
     if (
       !this.context.device ||
       !this.context.context ||
@@ -1235,16 +1312,29 @@ export class GpuLayer {
         this.statGpuInFlight = true;
         const tSubmit = performance.now();
         const wasCompute = _computeRan;
-        this.context.device.queue
+        const device = this.context.device;
+        device.queue
           .onSubmittedWorkDone()
           .then(() => {
+            if (this.context.device !== device) return;
             const ms = performance.now() - tSubmit;
             if (wasCompute) this.statGpuComputeMs = ms;
             else this.statGpuIdleMs = ms;
             this.statGpuInFlight = false;
           })
-          .catch(() => {
+          .catch((error: unknown) => {
+            if (this.context.device !== device) return;
             this.statGpuInFlight = false;
+            this.context.reportError(
+              createError(
+                'GPU_QUEUE_FAILED',
+                'GPU queue completion failed: ' + gpuErrorMessage(error),
+                {
+                  cause: error instanceof Error ? error : undefined,
+                  context: { operation: 'frame-timing' },
+                }
+              )
+            );
           });
       }
       // 描画点数の読み戻し（compute が走ったフレームのみ・throttle・sticky）
@@ -1690,35 +1780,97 @@ export class GpuLayer {
       computeRan: this.statComputeRan,
       processedCount: this.statProcessed,
       drawnCount: this.statDrawn,
+      drawnCountStatus: this.statDrawnStatus,
       totalPointCount: this.totalPointCount,
       pointBudget: this.visiblePointLimit,
       cpuEncodeMs: Math.round(this.statCpuMs * 100) / 100,
       gpuComputeMs: Math.round(this.statGpuComputeMs * 100) / 100,
       gpuIdleMs: Math.round(this.statGpuIdleMs * 100) / 100,
+      gpuAllocatedBytes: this.getAllocatedGpuBytes(),
       zoom: this.zoom,
     };
   }
 
+  /**
+   * 点数からの推定ではなく、現在の各バッファの実際の要求サイズを合計する。
+   * 件数縮小後の余剰容量や、無効化後も保持しているオフスクリーンも含める。
+   * 新しい常駐バッファを追加するときは、この一覧にも含める。
+   */
+  private getAllocatedGpuBytes(): number {
+    if (!this.context.device) return 0;
+    const buffers = [
+      this.quadVertexBuffer,
+      this.allPointsBuffer,
+      this.visibleIndicesBuffer,
+      this.atomicCounterBuffer,
+      this.indirectBuffer,
+      this.indexBuffer,
+      this.renderUniformBuffer,
+      this.computeUniformBuffer,
+      this.filterColumnsBuffer,
+      this.visibilityFlagsBuffer,
+      this.selectionFlagsBuffer,
+      this.selectionCountBuffer,
+      this.hoverFlagsBuffer,
+      this.brushUniformBuffer,
+      this.countUniformBuffer,
+      this.filteredIndicesBuffer,
+      this.filteredCounterBuffer,
+      this.filteredIndirectBuffer,
+      this.filteredRenderUniformBuffer,
+      this.recededRenderUniformBuffer,
+      this.compositeUniformBuffer,
+      ...this.readbackBuffers,
+    ];
+    const bufferBytes = buffers.reduce((sum, buffer) => sum + (buffer?.size ?? 0), 0);
+    // 現在のオフスクリーンは、単一 mip・単一 sample の RGBA/BGRA 8 bit テクスチャ。
+    const textureBytes = this.offscreenTexture
+      ? this.offscreenTexture.width * this.offscreenTexture.height * 4
+      : 0;
+    return bufferBytes + textureBytes;
+  }
+
   /** 描画点数（atomicCounter = visibleIndices 件数）を非同期読み戻し（計測用・throttle）。 */
   private async readDrawnCount(): Promise<void> {
-    if (!this.context.device || !this.atomicCounterBuffer) return;
+    const device = this.context.device;
+    if (!device || !this.atomicCounterBuffer) return;
     this.statDrawnInFlight = true;
+    this.statDrawnStatus = 'pending';
     let staging: GPUBuffer | null = null;
     try {
-      staging = this.context.device.createBuffer({
+      staging = device.createBuffer({
+        label: 'visible-point-count-readback',
         size: 4,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-      const enc = this.context.device.createCommandEncoder();
+      this.readbackBuffers.add(staging);
+      const enc = device.createCommandEncoder({ label: 'visible-point-count-readback' });
       enc.copyBufferToBuffer(this.atomicCounterBuffer, 0, staging, 0, 4);
-      this.context.device.queue.submit([enc.finish()]);
+      device.queue.submit([enc.finish()]);
       await staging.mapAsync(GPUMapMode.READ);
+      if (this.context.device !== device) return;
       this.statDrawn = new Uint32Array(staging.getMappedRange().slice(0))[0];
+      this.statDrawnStatus = 'ready';
       staging.unmap();
-    } catch {
-      /* 計測用なので失敗は無視 */
+    } catch (error) {
+      // 破棄した古いデバイスの読み戻し失敗を、新しい画面のエラーとして通知しない。
+      if (this.context.device !== device) return;
+      this.statDrawnStatus = 'error';
+      this.context.reportError(
+        createError(
+          'GPU_READBACK_FAILED',
+          `Point count readback failed: ${gpuErrorMessage(error)}`,
+          {
+            cause: error instanceof Error ? error : undefined,
+            context: { operation: 'visible-point-count-readback' },
+          }
+        )
+      );
     } finally {
-      if (staging) staging.destroy(); // 例外時もバッファをリークさせない
+      if (staging) {
+        this.readbackBuffers.delete(staging);
+        staging.destroy(); // 例外時もバッファをリークさせない
+      }
       this.statDrawnInFlight = false;
     }
   }
@@ -1732,14 +1884,19 @@ export class GpuLayer {
       size: 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    const encoder = this.context.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(this.selectionCountBuffer, 0, staging, 0, 4);
-    this.context.device.queue.submit([encoder.finish()]);
-    await staging.mapAsync(GPUMapMode.READ);
-    const count = new Uint32Array(staging.getMappedRange().slice(0))[0];
-    staging.unmap();
-    staging.destroy();
-    return count;
+    this.readbackBuffers.add(staging);
+    try {
+      const encoder = this.context.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.selectionCountBuffer, 0, staging, 0, 4);
+      this.context.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const count = new Uint32Array(staging.getMappedRange().slice(0))[0];
+      staging.unmap();
+      return count;
+    } finally {
+      this.readbackBuffers.delete(staging);
+      staging.destroy();
+    }
   }
 
   /** brush pass → count pass を1回の submit で実行する */
@@ -1803,6 +1960,9 @@ export class GpuLayer {
    * リソースを破棄する
    */
   destroy(): void {
+    this.disposed = true;
+    for (const buffer of this.readbackBuffers) buffer.destroy();
+    this.readbackBuffers.clear();
     this.quadVertexBuffer?.destroy();
     this.allPointsBuffer?.destroy();
     this.visibleIndicesBuffer?.destroy();
