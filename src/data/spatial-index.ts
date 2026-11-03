@@ -62,14 +62,10 @@ function distSqToBounds(bounds: Bounds, x: number, y: number): number {
  */
 class QuadTree {
   private readonly root: QuadTreeNode;
-  private readonly xArr: Float64Array | Float32Array;
-  private readonly yArr: Float64Array | Float32Array;
+  private readonly xArr: ArrayLike<number>;
+  private readonly yArr: ArrayLike<number>;
 
-  constructor(
-    xArr: Float64Array | Float32Array,
-    yArr: Float64Array | Float32Array,
-    length: number
-  ) {
+  constructor(xArr: ArrayLike<number>, yArr: ArrayLike<number>, length: number) {
     this.xArr = xArr;
     this.yArr = yArr;
 
@@ -258,11 +254,7 @@ export class SpatialPointIndex {
    * @param yArr Y座標配列
    * @param length ポイント数
    */
-  build(
-    xArr: Float64Array | Float32Array,
-    yArr: Float64Array | Float32Array,
-    length: number
-  ): void {
+  build(xArr: ArrayLike<number>, yArr: ArrayLike<number>, length: number): void {
     if (length === 0) {
       this.quadTree = null;
       return;

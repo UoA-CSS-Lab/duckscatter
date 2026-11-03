@@ -47,7 +47,10 @@ const DEFAULT_SELECTION_STYLE: Required<SelectionStyle> = {
  * GPU用に処理されたポイントデータ
  */
 export interface AllPointsData {
-  /** インスタンスデータ (x, y, color, size) の Float32Array */
+  /**
+   * 点順の (x, y, color, size)。color の領域は u32 のビット列として保持する。
+   * 元の Arrow バッファの一部を使う場合があるため、転送には byteOffset と byteLength を使う。
+   */
   instanceData: Float32Array;
   /** 全ポイント数 */
   totalCount: number;
