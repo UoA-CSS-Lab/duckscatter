@@ -1,6 +1,9 @@
 import { useState, useCallback } from 'react';
 import { useScatterPlot } from '../context/ScatterPlotContext';
 
+// 公開日は日単位なので、両端を UTC の日付境界に保つ。
+const SECONDS_PER_DAY = 24 * 60 * 60;
+
 export function TimeFilterSlider() {
   const { state, updateTimeFilter } = useScatterPlot();
   const { timeRange } = state;
@@ -48,11 +51,10 @@ export function TimeFilterSlider() {
     }
   }, [timeRange, updateTimeFilter]);
 
-  // 日時フォーマット関数（UNIXタイムスタンプ秒 → 日付文字列）
+  // SQL が返す UNIX 秒を UTC の公開日として表示する。
   const formatTime = (timestamp: number) => {
-    // タイムスタンプが大きい場合はミリ秒として扱う
-    const ts = timestamp > 1e12 ? timestamp : timestamp * 1000;
-    return new Date(ts).toLocaleDateString('ja-JP', {
+    return new Date(timestamp * 1000).toLocaleDateString('ja-JP', {
+      timeZone: 'UTC',
       year: 'numeric',
       month: 'short',
       day: 'numeric',
@@ -72,7 +74,7 @@ export function TimeFilterSlider() {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex justify-between items-center">
-        <label className="text-sm font-medium text-zinc-700">Time Filter</label>
+        <label className="text-sm font-medium text-zinc-700">Publish Date</label>
         <button
           onClick={handleReset}
           className="text-xs text-zinc-500 hover:text-zinc-800 underline"
@@ -97,9 +99,10 @@ export function TimeFilterSlider() {
         {/* 最小値スライダー */}
         <input
           type="range"
+          aria-label="Earliest publish date"
           min={timeRange.min}
           max={timeRange.max}
-          step={(timeRange.max - timeRange.min) / 1000}
+          step={SECONDS_PER_DAY}
           value={minValue}
           onChange={handleMinChange}
           className="absolute w-full h-2 top-1/2 -translate-y-1/2 appearance-none bg-transparent pointer-events-none
@@ -128,9 +131,10 @@ export function TimeFilterSlider() {
         {/* 最大値スライダー */}
         <input
           type="range"
+          aria-label="Latest publish date"
           min={timeRange.min}
           max={timeRange.max}
-          step={(timeRange.max - timeRange.min) / 1000}
+          step={SECONDS_PER_DAY}
           value={maxValue}
           onChange={handleMaxChange}
           className="absolute w-full h-2 top-1/2 -translate-y-1/2 appearance-none bg-transparent pointer-events-none

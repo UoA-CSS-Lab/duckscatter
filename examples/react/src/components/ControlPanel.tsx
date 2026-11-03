@@ -8,7 +8,6 @@ import { PointLimitSlider } from './PointLimitSlider';
 import { StatsDisplay } from './StatsDisplay';
 import { HoverControlPanel } from './HoverControlPanel';
 import { TimeFilterSlider } from './TimeFilterSlider';
-import { FileUploadButton } from './FileUploadButton';
 
 export function ControlPanel() {
   return (
@@ -17,7 +16,6 @@ export function ControlPanel() {
         <h2 className="text-lg font-semibold text-zinc-800">Controls</h2>
         <StatsDisplay />
       </div>
-      <FileUploadButton />
       <PointLimitSlider />
       <PointAlphaSlider />
       <PointSizeScaleSlider />

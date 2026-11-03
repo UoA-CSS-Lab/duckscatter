@@ -407,19 +407,11 @@ npm run dev
 
 ### サンプルデータ
 
-サンプルでは、GloVe 6B単語ベクトルをUMAPで2次元に投影したデータを使用しています（約40万単語）。
+サンプルでは、ABC News の英語ニュース見出し 1,244,184 件を EmbeddingGemma 2 で埋め込み、UMAP で 2 次元に投影したデータを使用しています。417 個のクラスタラベルと英語の説明文を同梱しています。
 
-* データセット: https://huggingface.co/datasets/mt0rm0/glove.6B.50d.umap.2d
-
-### ラベル生成
-
-ラベルはDBSCANクラスタリングとOpenAI APIを使って生成できます:
-
-```bash
-cd examples/react
-export OPENAI_API_KEY="your-api-key"
-python scripts/generate_labels.py
-```
+* 元データ: [A Million News Headlines](https://www.kaggle.com/datasets/therohk/million-headlines)
+* データ配布元によるライセンス表記: CC0-1.0
+* 同梱ファイルと列の説明: [React サンプルの README](./examples/react/README.md#サンプルデータ)
 
 ## 開発者向けドキュメント
 

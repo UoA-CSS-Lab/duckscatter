@@ -5,37 +5,37 @@ import { useScatterPlot } from '../context/ScatterPlotContext';
 const PAGE_SIZE = 20;
 
 export function LabelList() {
-  const { state, getLabels, setLabelHover } = useScatterPlot();
+  const { state, setLabelHover } = useScatterPlot();
   const [page, setPage] = useState(0);
 
-  // Load and sort labels by count (descending)
+  // ラベルの差し替えを反映し、件数の降順で一覧を作る。
   const labels = useMemo(() => {
     if (!state.isInitialized) return [];
-    const allLabels = getLabels();
-    return [...allLabels].sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
-  }, [state.isInitialized, getLabels]);
-
-  // Paginate labels
-  const pagedLabels = useMemo(() => {
-    const start = page * PAGE_SIZE;
-    return labels.slice(start, start + PAGE_SIZE);
-  }, [labels, page]);
+    return [...state.labels].sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
+  }, [state.isInitialized, state.labels]);
 
   const totalPages = Math.ceil(labels.length / PAGE_SIZE);
+  const currentPage = Math.min(page, Math.max(0, totalPages - 1));
+
+  // 差し替えで件数が減っても、存在するページを表示する。
+  const pagedLabels = useMemo(() => {
+    const start = currentPage * PAGE_SIZE;
+    return labels.slice(start, start + PAGE_SIZE);
+  }, [labels, currentPage]);
 
   const handlePrev = () => {
-    if (page > 0) setPage(page - 1);
+    if (currentPage > 0) setPage(currentPage - 1);
   };
 
   const handleNext = () => {
-    if (page < totalPages - 1) setPage(page + 1);
+    if (currentPage < totalPages - 1) setPage(currentPage + 1);
   };
 
   const handleLabelClick = (label: Label) => {
     setLabelHover({ text: label.text });
   };
 
-  // Check if a label is currently hovered
+  // 現在ホバーしているラベルを強調する。
   const isHovered = (label: Label) => {
     return state.hoveredLabel?.text === label.text;
   };
@@ -50,7 +50,7 @@ export function LabelList() {
 
   return (
     <div className="flex flex-col gap-2">
-      {/* List */}
+      {/* ラベル一覧 */}
       <div className="max-h-48 overflow-y-auto border border-zinc-200 rounded bg-white">
         {pagedLabels.map((label, idx) => (
           <div
@@ -69,26 +69,31 @@ export function LabelList() {
             {label.cluster !== undefined && (
               <span className="text-zinc-400 text-[10px]">cluster: {label.cluster}</span>
             )}
+            {typeof label.properties?.cluster_description === 'string' && (
+              <p className="mt-1 text-zinc-500 line-clamp-2">
+                {label.properties.cluster_description}
+              </p>
+            )}
           </div>
         ))}
       </div>
 
-      {/* Pagination */}
+      {/* ページ切り替え */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between text-xs">
           <button
             onClick={handlePrev}
-            disabled={page === 0}
+            disabled={currentPage === 0}
             className="px-2 py-1 bg-zinc-100 rounded hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Prev
           </button>
           <span className="text-zinc-500">
-            {page + 1} / {totalPages}
+            {currentPage + 1} / {totalPages}
           </span>
           <button
             onClick={handleNext}
-            disabled={page >= totalPages - 1}
+            disabled={currentPage >= totalPages - 1}
             className="px-2 py-1 bg-zinc-100 rounded hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Next
@@ -96,9 +101,7 @@ export function LabelList() {
         </div>
       )}
 
-      <div className="text-[10px] text-zinc-400">
-        Total: {labels.length} labels
-      </div>
+      <div className="text-[10px] text-zinc-400">Total: {labels.length} labels</div>
     </div>
   );
 }
