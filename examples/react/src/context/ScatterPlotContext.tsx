@@ -14,9 +14,20 @@ import type {
   LabelIdentifier,
   GpuWhereCondition,
 } from '@uoa-css-lab/duckscatter';
+import {
+  DEFAULT_POINT_COLOR,
+  CLUSTER_COLOR_SQL,
+  buildSingleColorSql,
+  readClusterColors,
+  replaceClusterColorTable,
+  type ClusterColor,
+  type PointColorMode,
+} from '../utils/clusterColors';
 
 // 公開日（YYYYMMDD）を UNIX 秒へ変換し、範囲の取得と GPU フィルターで同じ式を使う。
 const PUBLISH_TIME_SQL = "epoch(strptime(CAST(publish_date AS VARCHAR), '%Y%m%d'))";
+
+export const DEFAULT_LABEL_FONT_SIZE = 12;
 
 interface ScatterPlotState {
   isInitialized: boolean;
@@ -26,6 +37,10 @@ interface ScatterPlotState {
   hoveredLabel: Label | null;
   pointCount: number | null;
   hasHeadlineText: boolean;
+  hasClusterId: boolean;
+  hasClusterColors: boolean;
+  colorMode: PointColorMode;
+  pointColor: string;
   /** 読み込み済みラベルの表示用スナップショット */
   labels: Label[];
   /** 公開日の範囲（UNIX 秒の min/max） */
@@ -40,7 +55,10 @@ export interface PointListItem {
   publishDate: number | null;
 }
 
-type DataSummary = Pick<ScatterPlotState, 'pointCount' | 'timeRange' | 'hasHeadlineText'>;
+type DataSummary = Pick<
+  ScatterPlotState,
+  'pointCount' | 'timeRange' | 'hasHeadlineText' | 'hasClusterId'
+>;
 
 /** 読み込んだ列を確認し、公開日を持つデータだけに日付フィルターを登録する。 */
 async function readDataSummary(plot: ScatterPlot): Promise<DataSummary> {
@@ -80,7 +98,21 @@ async function readDataSummary(plot: ScatterPlot): Promise<DataSummary> {
     pointCount,
     timeRange,
     hasHeadlineText: columns.has('headline_text'),
+    hasClusterId: columns.has('cluster_id'),
   };
+}
+
+/** 未対応のデータでは単色に戻し、存在しないクラスタ列を SQL に含めない。 */
+function getPointColorSettings(
+  requestedMode: PointColorMode,
+  pointColor: string,
+  hasClusterId: boolean,
+  colors: readonly ClusterColor[]
+): { colorMode: PointColorMode; colorSql: string; hasClusterColors: boolean } {
+  const hasClusterColors = hasClusterId && colors.length > 0;
+  const colorMode = requestedMode === 'cluster' && hasClusterColors ? 'cluster' : 'single';
+  const colorSql = colorMode === 'cluster' ? CLUSTER_COLOR_SQL : buildSingleColorSql(pointColor);
+  return { colorMode, colorSql, hasClusterColors };
 }
 
 interface ScatterPlotContextValue {
@@ -88,7 +120,8 @@ interface ScatterPlotContextValue {
   state: ScatterPlotState;
   initializePlot: (canvas: HTMLCanvasElement) => Promise<void>;
   updateSize: (sizeSql: string) => Promise<void>;
-  updateColor: (colorSql: string) => Promise<void>;
+  updateColorMode: (mode: PointColorMode) => Promise<void>;
+  updatePointColor: (color: string) => Promise<void>;
   updateSearch: (searchText: string) => Promise<void>;
   updatePointLimit: (limit: number) => Promise<void>;
   updateLabelFilter: (searchText: string) => void;
@@ -98,6 +131,8 @@ interface ScatterPlotContextValue {
   updatePointAlpha: (alpha: number) => void;
   /** グローバルサイズスケールを設定 */
   updatePointSizeScale: (scale: number) => void;
+  /** ラベルのフォントサイズをピクセル単位で設定 */
+  updateLabelFontSize: (fontSize: number) => Promise<void>;
   /** フィルター除外ポイントの表示モードを設定 */
   updateFilteredPointDisplayMode: (mode: 'hidden' | 'grayed') => void;
   // ホバーの操作
@@ -114,6 +149,7 @@ const ScatterPlotContext = createContext<ScatterPlotContextValue | null>(null);
 export function ScatterPlotProvider({ children }: { children: ReactNode }) {
   const plotRef = useRef<ScatterPlot | null>(null);
   const dataSummaryRef = useRef<DataSummary | null>(null);
+  const clusterColorsRef = useRef<ClusterColor[]>([]);
   const [state, setState] = useState<ScatterPlotState>({
     isInitialized: false,
     isLoading: false,
@@ -122,6 +158,10 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     hoveredLabel: null,
     pointCount: null,
     hasHeadlineText: false,
+    hasClusterId: false,
+    hasClusterColors: false,
+    colorMode: 'cluster',
+    pointColor: DEFAULT_POINT_COLOR,
     labels: [],
     timeRange: null,
   });
@@ -130,14 +170,19 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     searchText: string;
     sizeSql: string;
     colorSql: string;
+    colorMode: PointColorMode;
+    pointColor: string;
     visiblePointLimit: number;
+    labelFontSize: number;
     timeRangeFilter: { min: number | null; max: number | null };
   }>({
     searchText: '',
     sizeSql: '5',
-    colorSql:
-      '(CAST(255 AS BIGINT) * 16777216 + 59 * 65536 + 130 * 256 + 246 - CASE WHEN (CAST(255 AS BIGINT) * 16777216 + 59 * 65536 + 130 * 256 + 246) > 2147483647 THEN 4294967296 ELSE 0 END)::INTEGER',
+    colorSql: buildSingleColorSql(DEFAULT_POINT_COLOR),
+    colorMode: 'cluster',
+    pointColor: DEFAULT_POINT_COLOR,
     visiblePointLimit: 100000,
+    labelFontSize: DEFAULT_LABEL_FONT_SIZE,
     timeRangeFilter: { min: null, max: null },
   });
 
@@ -172,6 +217,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
       },
       labels: {
         url: `${import.meta.env.BASE_URL}abcnews-clusters.geojson`,
+        fontSize: filtersRef.current.labelFontSize,
         onClick: (label) => {
           console.log('Label clicked:', label);
         },
@@ -197,23 +243,43 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
 
     try {
       await plot.initialize();
+      const summary = await readDataSummary(plot);
+      const colors = readClusterColors(plot.getLabels());
+      await replaceClusterColorTable((sql) => plot.runQuery(sql), colors);
+      const colorSettings = getPointColorSettings(
+        filtersRef.current.colorMode,
+        filtersRef.current.pointColor,
+        summary.hasClusterId,
+        colors
+      );
+      // スキーマとラベルを確認してから、既存の色更新経路でクラスタ色を適用する。
+      await plot.update({ data: { colorSql: colorSettings.colorSql } });
+      clusterColorsRef.current = colors;
+      filtersRef.current.colorMode = colorSettings.colorMode;
+      filtersRef.current.colorSql = colorSettings.colorSql;
+      dataSummaryRef.current = summary;
       plotRef.current = plot;
       plot.render();
 
-      const summary = await readDataSummary(plot);
-      dataSummaryRef.current = summary;
       setState((s) => ({
         ...s,
         ...summary,
+        colorMode: colorSettings.colorMode,
+        hasClusterColors: colorSettings.hasClusterColors,
         labels: plot.getLabels(),
         isInitialized: true,
         isLoading: false,
       }));
     } catch (e) {
+      let message = e instanceof Error ? e.message : 'Failed to initialize';
+      // 初期化に失敗して参照を保持しない場合も、GPU の監視とリソースを残さない。
+      await plot.destroy().catch((cleanupError: unknown) => {
+        message += `\nPlot cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+      });
       setState((s) => ({
         ...s,
         isLoading: false,
-        error: e instanceof Error ? e.message : 'Failed to initialize',
+        error: message,
       }));
     }
   }, []);
@@ -234,20 +300,36 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     [buildWhereConditions]
   );
 
-  const updateColor = useCallback(
-    async (colorSql: string) => {
-      if (!plotRef.current) return;
-      filtersRef.current.colorSql = colorSql;
-      await plotRef.current.update({
-        data: {
-          sizeSql: filtersRef.current.sizeSql,
-          colorSql,
-          whereConditions: buildWhereConditions(),
-        },
-      });
-      plotRef.current.render();
-    },
-    [buildWhereConditions]
+  const applyPointColor = useCallback(async (mode: PointColorMode, pointColor: string) => {
+    const plot = plotRef.current;
+    const summary = dataSummaryRef.current;
+    if (!plot || !summary) return;
+    if (mode === 'cluster' && (!summary.hasClusterId || clusterColorsRef.current.length === 0)) {
+      throw new Error('Cluster coloring requires cluster IDs and RGB label colors.');
+    }
+    const settings = getPointColorSettings(
+      mode,
+      pointColor,
+      summary.hasClusterId,
+      clusterColorsRef.current
+    );
+    filtersRef.current.colorSql = settings.colorSql;
+    filtersRef.current.colorMode = settings.colorMode;
+    filtersRef.current.pointColor = pointColor;
+    await plot.update({ data: { colorSql: settings.colorSql } });
+    if (plot !== plotRef.current) return;
+    plot.clearPointHover();
+    setState((s) => ({ ...s, colorMode: settings.colorMode, pointColor }));
+  }, []);
+
+  const updateColorMode = useCallback(
+    (mode: PointColorMode) => applyPointColor(mode, filtersRef.current.pointColor),
+    [applyPointColor]
+  );
+
+  const updatePointColor = useCallback(
+    (color: string) => applyPointColor('single', color),
+    [applyPointColor]
   );
 
   const updateSearch = useCallback(
@@ -307,7 +389,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     if (searchText.trim() === '') {
       plotRef.current.update({
         labels: {
-          filterLambda: () => true,
+          filterLambda: null,
         },
       });
     } else {
@@ -369,6 +451,15 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     plotRef.current.setPointSizeScale(scale);
   }, []);
 
+  const updateLabelFontSize = useCallback(async (fontSize: number) => {
+    // 表示の更新と再読み込み時の初期値を同じ設定に保つ。
+    filtersRef.current.labelFontSize = fontSize;
+    const plot = plotRef.current;
+    if (!plot) return;
+    await plot.update({ labels: { fontSize } });
+    plot.render();
+  }, []);
+
   const updateFilteredPointDisplayMode = useCallback((mode: 'hidden' | 'grayed') => {
     if (!plotRef.current) return;
     plotRef.current.setFilteredPointDisplayMode(mode);
@@ -427,13 +518,15 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
         state,
         initializePlot,
         updateSize,
-        updateColor,
+        updateColorMode,
+        updatePointColor,
         updateSearch,
         updatePointLimit,
         updateLabelFilter,
         updateTimeFilter,
         updatePointAlpha,
         updatePointSizeScale,
+        updateLabelFontSize,
         updateFilteredPointDisplayMode,
         setPointHover,
         setLabelHover,

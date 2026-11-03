@@ -24,7 +24,7 @@ export interface LabelLayerOptions {
   /** ラベルのフォントサイズ（ピクセル） */
   labelFontSize?: number;
   /** ラベルのフィルタリング関数 */
-  filterLambda?: LabelFilterLambda;
+  filterLambda?: LabelFilterLambda | null;
   /**
    * filterLambda が false を返した「非マッチ」ラベルの不透明度（0-1）。指定すると非マッチ
    * ラベルをグレー化せず、元のクラスタ色のまま opacity だけ下げて描画する（dim-only）。
@@ -164,7 +164,7 @@ export class LabelLayer {
     this.canvas = options.canvas;
     this.minLabelDistance = options.minLabelDistance ?? this.minLabelDistance;
     this.labelFontSize = options.labelFontSize ?? this.labelFontSize;
-    this.filterLambda = options.filterLambda;
+    this.filterLambda = options.filterLambda ?? undefined;
     this.unmatchedLabelOpacity = options.unmatchedLabelOpacity;
     this.mutedLambda = options.mutedLambda;
     this.mutedLabelColor = options.mutedLabelColor ?? [102, 102, 102];
@@ -778,7 +778,7 @@ export class LabelLayer {
       this.labelFontSize = options.labelFontSize;
     }
     if (options.filterLambda !== undefined) {
-      this.filterLambda = options.filterLambda;
+      this.filterLambda = options.filterLambda ?? undefined;
     }
     if (options.unmatchedLabelOpacity !== undefined) {
       this.unmatchedLabelOpacity = options.unmatchedLabelOpacity;

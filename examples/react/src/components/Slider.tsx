@@ -11,6 +11,8 @@ interface SliderProps {
   step: number;
   /** 初期値 */
   defaultValue: number;
+  /** 読み込み中など、値を変更できないときに指定する */
+  disabled?: boolean;
   /** 値変更時のコールバック */
   onChange: (value: number) => void;
   /** 値のパース関数（デフォルト: parseFloat） */
@@ -32,6 +34,7 @@ export function Slider({
   max,
   step,
   defaultValue,
+  disabled = false,
   onChange,
   parseValue = parseFloat,
   formatValue = (v) => v.toFixed(2),
@@ -56,12 +59,14 @@ export function Slider({
       </label>
       <input
         type="range"
+        aria-label={label}
         min={min}
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={handleChange}
-        className="w-full h-2 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+        className="w-full h-2 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
       />
       {(minLabel || maxLabel) && (
         <div className="flex justify-between text-xs text-zinc-500">

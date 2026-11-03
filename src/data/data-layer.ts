@@ -15,6 +15,8 @@ export interface DataLayerOptions {
   sizeSql?: string;
   /** ポイント色を計算するSQL式（ARGB形式） */
   colorSql?: string;
+  /** 同じ SQL 式が参照する値の変更後に、全点の描画属性を再取得する */
+  reloadPoints?: boolean;
   /** データフィルタリング用のWHERE条件 */
   whereConditions?: WhereCondition[];
   /** GPUでフィルタリングするカラム名（最大4つ。超過分は無視される） */
@@ -32,7 +34,7 @@ export interface DataLayerOptions {
  * 実際の GPU upload は ScatterPlot 側で行う。
  */
 export interface DataLayerUpdateResult {
-  /** sizeSql/colorSql 変更により x/y/size/color の再 materialize が必要になった */
+  /** SQL 式の変更または明示的な再取得により、全点の描画属性を再生成する */
   allPointsChanged: boolean;
   /** whereConditions 変更により visibility bitmap の再生成が必要になった */
   visibilityChanged: boolean;
@@ -433,7 +435,7 @@ export class DataLayer {
    * @returns 変更の種類を示すオブジェクト
    */
   async updateOptions(options: Partial<DataLayerOptions>): Promise<DataLayerUpdateResult> {
-    let needsFullReload = false;
+    let needsFullReload = options.reloadPoints === true;
     let needsVisibilityUpdate = false;
     let gpuFilterColumnsChanged = false;
 
