@@ -411,7 +411,7 @@ export class LabelLayer {
           } else if (this.unmatchedLabelOpacity !== undefined) {
             // dim-only: グレー化や非表示ではなく opacity だけ下げる（ノードの dim-only 選択と
             // 視覚を揃える）。色を持つラベルは元のクラスタ色を保持し、color 配列を持たない
-            // 標準ラベル（generate_labels.py の cluster_label/cluster/count のみ）でも要求 opacity
+            // 標準ラベル（cluster_label/cluster/count のみ）でも要求 opacity
             // を尊重する（中立グレーを同じ opacity で適用）。
             const a = this.unmatchedLabelOpacity;
             const col = label.properties?.color;

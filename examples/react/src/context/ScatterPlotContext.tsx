@@ -7,7 +7,16 @@ import {
   useEffect,
   type ReactNode,
 } from 'react';
-import type { ScatterPlot, WhereCondition, Label, LabelIdentifier, GpuWhereCondition } from '@uoa-css-lab/duckscatter';
+import type {
+  ScatterPlot,
+  WhereCondition,
+  Label,
+  LabelIdentifier,
+  GpuWhereCondition,
+} from '@uoa-css-lab/duckscatter';
+
+// 公開日（YYYYMMDD）を UNIX 秒へ変換し、範囲の取得と GPU フィルターで同じ式を使う。
+const PUBLISH_TIME_SQL = "epoch(strptime(CAST(publish_date AS VARCHAR), '%Y%m%d'))";
 
 interface ScatterPlotState {
   isInitialized: boolean;
@@ -16,7 +25,10 @@ interface ScatterPlotState {
   hoveredPoint: Record<string, unknown> | null;
   hoveredLabel: Label | null;
   pointCount: number | null;
-  /** created_atカラムの範囲（min/max） */
+  hasHeadlineText: boolean;
+  /** 読み込み済みラベルの表示用スナップショット */
+  labels: Label[];
+  /** 公開日の範囲（UNIX 秒の min/max） */
   timeRange: { min: number; max: number } | null;
 }
 
@@ -24,14 +36,57 @@ export interface PointListItem {
   id: number;
   x: number;
   y: number;
+  headlineText: string | null;
+  publishDate: number | null;
+}
+
+type DataSummary = Pick<ScatterPlotState, 'pointCount' | 'timeRange' | 'hasHeadlineText'>;
+
+/** 読み込んだ列を確認し、公開日を持つデータだけに日付フィルターを登録する。 */
+async function readDataSummary(plot: ScatterPlot): Promise<DataSummary> {
+  const schema = await plot.runQuery('DESCRIBE parquet_data');
+  const columnNames = schema?.columnData.get('column_name');
+  if (!schema || !columnNames) {
+    throw new Error('Failed to read the Parquet schema.');
+  }
+  const columns = new Set<string>();
+  for (let i = 0; i < schema.rowCount; i++) {
+    columns.add(String(columnNames.get(i)));
+  }
+
+  const hasPublishDate = columns.has('publish_date');
+  const timeColumns = hasPublishDate
+    ? `MIN(${PUBLISH_TIME_SQL}) AS min_time, MAX(${PUBLISH_TIME_SQL}) AS max_time`
+    : 'NULL AS min_time, NULL AS max_time';
+  const result = await plot.runQuery(`SELECT COUNT(*) AS count, ${timeColumns} FROM parquet_data`);
+  if (!result || result.rowCount === 0) {
+    throw new Error('Failed to read the Parquet summary.');
+  }
+
+  // Arrow の列は配列添字ではなく get() で読む。NULL を epoch の 0 秒に変換しない。
+  const pointCount = Number(result?.columnData.get('count')?.get(0) ?? 0);
+  const min = result?.columnData.get('min_time')?.get(0);
+  const max = result?.columnData.get('max_time')?.get(0);
+  const timeRange =
+    min != null && max != null && Number.isFinite(Number(min)) && Number.isFinite(Number(max))
+      ? { min: Number(min), max: Number(max) }
+      : null;
+
+  await plot.update({
+    data: { gpuFilterColumns: timeRange ? [PUBLISH_TIME_SQL] : [] },
+  });
+
+  return {
+    pointCount,
+    timeRange,
+    hasHeadlineText: columns.has('headline_text'),
+  };
 }
 
 interface ScatterPlotContextValue {
   plot: ScatterPlot | null;
   state: ScatterPlotState;
   initializePlot: (canvas: HTMLCanvasElement) => Promise<void>;
-  /** ローカルのParquetファイルを読み込んでプロットを再初期化する */
-  loadDataFile: (file: File) => Promise<void>;
   updateSize: (sizeSql: string) => Promise<void>;
   updateColor: (colorSql: string) => Promise<void>;
   updateSearch: (searchText: string) => Promise<void>;
@@ -45,11 +100,11 @@ interface ScatterPlotContextValue {
   updatePointSizeScale: (scale: number) => void;
   /** フィルター除外ポイントの表示モードを設定 */
   updateFilteredPointDisplayMode: (mode: 'hidden' | 'grayed') => void;
-  // Hover control
+  // ホバーの操作
   setPointHover: (pointId: number) => Promise<boolean>;
   setLabelHover: (identifier: LabelIdentifier) => boolean;
   clearAllHover: () => void;
-  // List data
+  // 一覧のデータ
   fetchPoints: (page: number, pageSize: number) => Promise<PointListItem[]>;
   getLabels: () => Label[];
 }
@@ -58,7 +113,7 @@ const ScatterPlotContext = createContext<ScatterPlotContextValue | null>(null);
 
 export function ScatterPlotProvider({ children }: { children: ReactNode }) {
   const plotRef = useRef<ScatterPlot | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dataSummaryRef = useRef<DataSummary | null>(null);
   const [state, setState] = useState<ScatterPlotState>({
     isInitialized: false,
     isLoading: false,
@@ -66,6 +121,8 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     hoveredPoint: null,
     hoveredLabel: null,
     pointCount: null,
+    hasHeadlineText: false,
+    labels: [],
     timeRange: null,
   });
 
@@ -78,17 +135,18 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
   }>({
     searchText: '',
     sizeSql: '5',
-    colorSql: '(CAST(255 AS BIGINT) * 16777216 + 59 * 65536 + 130 * 256 + 246 - CASE WHEN (CAST(255 AS BIGINT) * 16777216 + 59 * 65536 + 130 * 256 + 246) > 2147483647 THEN 4294967296 ELSE 0 END)::INTEGER',
+    colorSql:
+      '(CAST(255 AS BIGINT) * 16777216 + 59 * 65536 + 130 * 256 + 246 - CASE WHEN (CAST(255 AS BIGINT) * 16777216 + 59 * 65536 + 130 * 256 + 246) > 2147483647 THEN 4294967296 ELSE 0 END)::INTEGER',
     visiblePointLimit: 100000,
     timeRangeFilter: { min: null, max: null },
   });
 
   const buildWhereConditions = useCallback((): WhereCondition[] => {
     const conditions: WhereCondition[] = [];
-    if (filtersRef.current.searchText) {
+    if (dataSummaryRef.current?.hasHeadlineText && filtersRef.current.searchText) {
       conditions.push({
         type: 'string',
-        column: 'token',
+        column: 'headline_text',
         operator: 'contains',
         value: filtersRef.current.searchText,
       });
@@ -96,172 +154,69 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     return conditions;
   }, []);
 
-  const initializePlot = useCallback(
-    async (canvas: HTMLCanvasElement) => {
-      const { ScatterPlot } = await import('@uoa-css-lab/duckscatter');
+  const initializePlot = useCallback(async (canvas: HTMLCanvasElement) => {
+    const { ScatterPlot } = await import('@uoa-css-lab/duckscatter');
 
-      canvasRef.current = canvas;
-      setState((s) => ({ ...s, isLoading: true, error: null }));
+    setState((s) => ({ ...s, isLoading: true, error: null }));
 
-      const plot = new ScatterPlot({
-        canvas,
-        dataUrl: `${import.meta.env.BASE_URL}output.parquet`,
-        data: {
-          sizeSql: filtersRef.current.sizeSql,
-          colorSql: filtersRef.current.colorSql,
-          visiblePointLimit: filtersRef.current.visiblePointLimit,
-          gpuFilterColumns: ['created_at'],
+    const plot = new ScatterPlot({
+      canvas,
+      dataUrl: `${import.meta.env.BASE_URL}abcnews-embeddinggemma2-umap.parquet`,
+      data: {
+        sizeSql: filtersRef.current.sizeSql,
+        colorSql: filtersRef.current.colorSql,
+        visiblePointLimit: filtersRef.current.visiblePointLimit,
+      },
+      gpu: {
+        backgroundColor: { r: 0.85, g: 0.85, b: 0.85, a: 1.0 },
+      },
+      labels: {
+        url: `${import.meta.env.BASE_URL}abcnews-clusters.geojson`,
+        onClick: (label) => {
+          console.log('Label clicked:', label);
         },
-        gpu: {
-          backgroundColor: { r: 0.85, g: 0.85, b: 0.85, a: 1.0 },
+        hoverOutlineOptions: {
+          enabled: true,
+          color: '#ffffff',
+          width: 2,
         },
-        labels: {
-          url: `${import.meta.env.BASE_URL}label.geojson`,
-          onClick: (label) => {
-            console.log('Label clicked:', label);
-          },
-          hoverOutlineOptions: {
-            enabled: true,
-            color: '#ffffff',
-            width: 2,
-          },
+      },
+      interaction: {
+        onPointHover: (data) => {
+          setState((s) => ({ ...s, hoveredPoint: data }));
         },
-        interaction: {
-          onPointHover: (data) => {
-            setState((s) => ({ ...s, hoveredPoint: data }));
-          },
-          onLabelHover: (label) => {
-            setState((s) => ({ ...s, hoveredLabel: label }));
-          },
+        onLabelHover: (label) => {
+          setState((s) => ({ ...s, hoveredLabel: label }));
         },
-      });
+      },
+    });
 
-      plot.on('error', (error) => {
-        setState((s) => ({ ...s, error: error.message }));
-      });
+    plot.on('error', (error) => {
+      setState((s) => ({ ...s, error: error.message }));
+    });
 
-      try {
-        await plot.initialize();
-        plotRef.current = plot;
-        plot.render();
+    try {
+      await plot.initialize();
+      plotRef.current = plot;
+      plot.render();
 
-        // Get point count
-        const result = await plot.runQuery('SELECT COUNT(*) as count FROM parquet_data');
-        let pointCount = 0;
-        if (result && result.rowCount > 0) {
-          const countCol = result.columnData.get('count');
-          if (countCol) {
-            pointCount = Number(countCol[0]);
-          }
-        }
-
-        // Get time range (created_at min/max)
-        let timeRange: { min: number; max: number } | null = null;
-        const timeResult = await plot.runQuery(
-          'SELECT MIN(created_at) as min_time, MAX(created_at) as max_time FROM parquet_data'
-        );
-        if (timeResult && timeResult.rowCount > 0) {
-          const minCol = timeResult.columnData.get('min_time');
-          const maxCol = timeResult.columnData.get('max_time');
-          if (minCol && maxCol) {
-            const minVal = Number(minCol.get(0));
-            const maxVal = Number(maxCol.get(0));
-            if (!isNaN(minVal) && !isNaN(maxVal)) {
-              timeRange = { min: minVal, max: maxVal };
-            }
-          }
-        }
-
-        setState((s) => ({ ...s, isInitialized: true, isLoading: false, pointCount, timeRange }));
-      } catch (e) {
-        setState((s) => ({
-          ...s,
-          isLoading: false,
-          error: e instanceof Error ? e.message : 'Failed to initialize',
-        }));
-      }
-    },
-    []
-  );
-
-  const loadDataFile = useCallback(
-    async (file: File) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-
-      // 既存のプロットを破棄
-      if (plotRef.current) {
-        await plotRef.current.destroy();
-        plotRef.current = null;
-      }
-
-      const { ScatterPlot } = await import('@uoa-css-lab/duckscatter');
-
+      const summary = await readDataSummary(plot);
+      dataSummaryRef.current = summary;
       setState((s) => ({
         ...s,
-        isInitialized: false,
-        isLoading: true,
-        error: null,
-        pointCount: null,
-        timeRange: null,
+        ...summary,
+        labels: plot.getLabels(),
+        isInitialized: true,
+        isLoading: false,
       }));
-
-      const plot = new ScatterPlot({
-        canvas,
-        dataFile: file,
-        data: {
-          sizeSql: filtersRef.current.sizeSql,
-          colorSql: filtersRef.current.colorSql,
-          visiblePointLimit: filtersRef.current.visiblePointLimit,
-        },
-        gpu: {
-          backgroundColor: { r: 0.85, g: 0.85, b: 0.85, a: 1.0 },
-        },
-        interaction: {
-          onPointHover: (data) => {
-            setState((s) => ({ ...s, hoveredPoint: data }));
-          },
-          onLabelHover: (label) => {
-            setState((s) => ({ ...s, hoveredLabel: label }));
-          },
-        },
-      });
-
-      plot.on('error', (error) => {
-        setState((s) => ({ ...s, error: error.message }));
-      });
-
-      try {
-        await plot.initialize();
-        plotRef.current = plot;
-        plot.render();
-
-        const result = await plot.runQuery('SELECT COUNT(*) as count FROM parquet_data');
-        let pointCount = 0;
-        if (result && result.rowCount > 0) {
-          const countCol = result.columnData.get('count');
-          if (countCol) {
-            pointCount = Number(countCol[0]);
-          }
-        }
-
-        setState((s) => ({
-          ...s,
-          isInitialized: true,
-          isLoading: false,
-          pointCount,
-          timeRange: null,
-        }));
-      } catch (e) {
-        setState((s) => ({
-          ...s,
-          isLoading: false,
-          error: e instanceof Error ? e.message : 'Failed to load file',
-        }));
-      }
-    },
-    []
-  );
+    } catch (e) {
+      setState((s) => ({
+        ...s,
+        isLoading: false,
+        error: e instanceof Error ? e.message : 'Failed to initialize',
+      }));
+    }
+  }, []);
 
   const updateSize = useCallback(
     async (sizeSql: string) => {
@@ -298,6 +253,9 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
   const updateSearch = useCallback(
     async (searchText: string) => {
       if (!plotRef.current) return;
+      if (searchText && !dataSummaryRef.current?.hasHeadlineText) {
+        throw new Error('Headline search requires the headline_text column.');
+      }
       filtersRef.current.searchText = searchText;
       await plotRef.current.update({
         data: {
@@ -328,7 +286,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     [buildWhereConditions]
   );
 
-  // Hover control methods
+  // ホバーの操作
   const setPointHover = useCallback(async (pointId: number): Promise<boolean> => {
     if (!plotRef.current) return false;
     return await plotRef.current.setPointHover(pointId);
@@ -349,7 +307,7 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     if (searchText.trim() === '') {
       plotRef.current.update({
         labels: {
-          filterLambda: undefined,
+          filterLambda: () => true,
         },
       });
     } else {
@@ -357,8 +315,16 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
       plotRef.current.update({
         labels: {
           filterLambda: (properties) => {
-            const label = (properties.cluster_label as string) || '';
-            return label.toLowerCase().includes(lowerSearch);
+            // 新データのラベル名と説明文を同じ検索対象にする。
+            return [
+              properties.cluster_label,
+              properties.cluster_label_50,
+              properties.title,
+              properties.cluster_description,
+              properties.summary,
+            ].some(
+              (value) => typeof value === 'string' && value.toLowerCase().includes(lowerSearch)
+            );
           },
         },
       });
@@ -366,32 +332,32 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     plotRef.current.render();
   }, []);
 
-  const updateTimeFilter = useCallback(
-    async (min: number | null, max: number | null) => {
-      if (!plotRef.current) return;
-      filtersRef.current.timeRangeFilter = { min, max };
+  const updateTimeFilter = useCallback(async (min: number | null, max: number | null) => {
+    if (!plotRef.current) return;
+    if ((min !== null || max !== null) && !dataSummaryRef.current?.timeRange) {
+      throw new Error('Publish date filtering requires a valid publish_date column.');
+    }
+    filtersRef.current.timeRangeFilter = { min, max };
 
-      // GPU側のフィルター条件を構築
-      const gpuConditions: GpuWhereCondition[] = [];
-      if (min !== null || max !== null) {
-        gpuConditions.push({
-          column: 'created_at',
-          min: min ?? undefined,
-          max: max ?? undefined,
-        });
-      }
-
-      await plotRef.current.update({
-        data: {
-          sizeSql: filtersRef.current.sizeSql,
-          colorSql: filtersRef.current.colorSql,
-          gpuWhereConditions: gpuConditions,
-        },
+    // GPU 側のフィルター条件を構築する。
+    const gpuConditions: GpuWhereCondition[] = [];
+    if (min !== null || max !== null) {
+      gpuConditions.push({
+        column: PUBLISH_TIME_SQL,
+        min: min ?? undefined,
+        max: max ?? undefined,
       });
-      plotRef.current.render();
-    },
-    []
-  );
+    }
+
+    await plotRef.current.update({
+      data: {
+        sizeSql: filtersRef.current.sizeSql,
+        colorSql: filtersRef.current.colorSql,
+        gpuWhereConditions: gpuConditions,
+      },
+    });
+    plotRef.current.render();
+  }, []);
 
   const updatePointAlpha = useCallback((alpha: number) => {
     if (!plotRef.current) return;
@@ -408,26 +374,31 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
     plotRef.current.setFilteredPointDisplayMode(mode);
   }, []);
 
-  // List data methods
+  // 一覧のデータ取得
   const fetchPoints = useCallback(
     async (page: number, pageSize: number): Promise<PointListItem[]> => {
       if (!plotRef.current) return [];
       const offset = page * pageSize;
       const result = await plotRef.current.runQuery(
-        `SELECT rowid as id, x, y FROM parquet_data ORDER BY rowid LIMIT ${pageSize} OFFSET ${offset}`
+        `SELECT rowid AS __point_id__, * FROM parquet_data ORDER BY rowid LIMIT ${pageSize} OFFSET ${offset}`
       );
       if (!result || result.rowCount === 0) return [];
 
-      const idCol = result.columnData.get('id');
+      const idCol = result.columnData.get('__point_id__');
       const xCol = result.columnData.get('x');
       const yCol = result.columnData.get('y');
+      const headlineCol = result.columnData.get('headline_text');
+      const dateCol = result.columnData.get('publish_date');
 
       const points: PointListItem[] = [];
       for (let i = 0; i < result.rowCount; i++) {
         points.push({
-          id: idCol?.get(i),
-          x: xCol?.get(i),
-          y: yCol?.get(i),
+          id: Number(idCol?.get(i)),
+          x: Number(xCol?.get(i)),
+          y: Number(yCol?.get(i)),
+          // 存在しない属性列は、一覧で空欄として扱う。
+          headlineText: headlineCol?.get(i) ?? null,
+          publishDate: dateCol?.get(i) ?? null,
         });
       }
       return points;
@@ -455,7 +426,6 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
         plot: plotRef.current,
         state,
         initializePlot,
-        loadDataFile,
         updateSize,
         updateColor,
         updateSearch,

@@ -28,7 +28,7 @@ export function LabelFilterInput() {
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="Filter by label name..."
+        placeholder="Filter by label or description..."
         className="px-3 py-2 bg-white border border-zinc-300 rounded text-zinc-800 text-sm"
       />
       {value && (

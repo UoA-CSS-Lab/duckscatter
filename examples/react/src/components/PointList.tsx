@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useScatterPlot, type PointListItem } from '../context/ScatterPlotContext';
+import { formatPublishDate } from '../utils/formatPublishDate';
 
 const PAGE_SIZE = 20;
 
@@ -66,10 +67,15 @@ export function PointList() {
                 isHovered(point.id) ? 'bg-blue-100 font-medium' : ''
               }`}
             >
-              <span className="text-zinc-500">rowid:{point.id}</span>{' '}
-              <span className="text-zinc-700">
-                ({point.x.toFixed(2)}, {point.y.toFixed(2)})
-              </span>
+              {point.headlineText && (
+                <div className="text-zinc-700 break-words">{point.headlineText}</div>
+              )}
+              <div className="text-zinc-500">
+                {point.publishDate !== null && (
+                  <span>{formatPublishDate(point.publishDate)} · </span>
+                )}
+                rowid:{point.id} ({point.x.toFixed(2)}, {point.y.toFixed(2)})
+              </div>
             </div>
           ))
         )}
