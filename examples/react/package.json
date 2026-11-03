@@ -7,8 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "lint": "eslint .",
-    "test:cluster-colors": "node scripts/check-cluster-colors.mjs"
+    "lint": "eslint ."
   },
   "dependencies": {
     "react": "19.3.1",
