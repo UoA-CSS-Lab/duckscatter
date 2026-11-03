@@ -20,6 +20,7 @@ import { GpuLayer } from './renderer/index.js';
 import { LabelLayer } from './ui/index.js';
 import { EventEmitter } from './event-emitter.js';
 import { createError } from './errors.js';
+import { WebGPUInitializationError } from './renderer/gpu-errors.js';
 
 /**
  * WebGPUを使用して散布図を描画するメインクラス
@@ -73,6 +74,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
       pointSizeScale: options.gpu?.pointSizeScale,
       selectionStyle: options.gpu?.selection,
       recededClamp: options.gpu?.recededClamp,
+      onError: (error) => this.emitError(error),
     });
 
     this.labelLayer = new LabelLayer({
@@ -266,6 +268,8 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    * @returns 分類されたScatterPlotErrorオブジェクト
    */
   private categorizeInitError(e: unknown): ScatterPlotError {
+    // シェーダーや pipeline の詳しい診断を、一般的な初期化エラーに置き換えない。
+    if (e instanceof WebGPUInitializationError) return e.diagnostic;
     const message = e instanceof Error ? e.message : String(e);
     const cause = e instanceof Error ? e : undefined;
 

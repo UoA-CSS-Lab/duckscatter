@@ -237,12 +237,17 @@ export function ScatterPlotProvider({ children }: { children: ReactNode }) {
       },
     });
 
+    let initializationError: string | undefined;
     plot.on('error', (error) => {
-      setState((s) => ({ ...s, error: error.message }));
+      const message = `[${error.code}] ${error.message}`;
+      // 初期化失敗後の後続エラーで、原因の詳しい診断を上書きしない。
+      if (error.severity === 'fatal') initializationError ??= message;
+      setState((s) => ({ ...s, error: initializationError ?? message }));
     });
 
     try {
       await plot.initialize();
+      if (initializationError) throw new Error(initializationError);
       const summary = await readDataSummary(plot);
       const colors = readClusterColors(plot.getLabels());
       await replaceClusterColorTable((sql) => plot.runQuery(sql), colors);

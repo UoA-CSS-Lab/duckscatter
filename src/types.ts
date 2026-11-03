@@ -349,6 +349,8 @@ export interface FrameStats {
   processedCount: number;
   /** 直近に compute が走ったフレームの描画点数（visibleIndices 件数, 非同期読み戻し・sticky） */
   drawnCount: number;
+  /** 描画件数の未計測・失敗を、実測の 0 件と区別する。 */
+  drawnCountStatus: 'pending' | 'ready' | 'error';
   /** 総点数（parquet 行数） */
   totalPointCount: number;
   /** LOD 予算（visiblePointLimit） */
@@ -359,6 +361,8 @@ export interface FrameStats {
   gpuComputeMs: number;
   /** render のみ（compute skip）フレームの GPU 完了時間 (ms, sticky)。gpuComputeMs との差が compute コストの目安 */
   gpuIdleMs: number;
+  /** アプリが保持する GPU バッファ・テクスチャの要求確保量。ドライバ等の管理領域を除く。 */
+  gpuAllocatedBytes: number;
   /** 現在のズーム倍率 */
   zoom: number;
 }
@@ -378,6 +382,12 @@ export type ErrorCode =
   | 'WEBGPU_NOT_SUPPORTED'
   | 'GPU_ADAPTER_NOT_AVAILABLE'
   | 'GPU_DEVICE_FAILED'
+  | 'GPU_DEVICE_LOST'
+  | 'GPU_UNCAPTURED_ERROR'
+  | 'GPU_SHADER_FAILED'
+  | 'GPU_PIPELINE_FAILED'
+  | 'GPU_READBACK_FAILED'
+  | 'GPU_QUEUE_FAILED'
   | 'WEBGPU_CONTEXT_FAILED'
   | 'DATA_LAYER_NOT_INITIALIZED'
   | 'PARQUET_LOAD_FAILED'
