@@ -167,6 +167,9 @@ export class DataLayer {
   ): Promise<AllPointsData> {
     // 構築時に保留した設定警告を、リスナーが登録済みのこの時点で発行する
     this.flushPendingConfigWarning();
+    // 入力が変わる場合は、同じ件数でも以前の座標と四分木を再利用しない。
+    this.spatialIndex.destroy();
+    this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
     this.repository = await createParquetReader();
     if (typeof source === 'string') {
       await this.repository.loadParquetFromUrl(source);
@@ -262,8 +265,11 @@ export class DataLayer {
         floatView[base + 3] = sizeArr[i];
       }
 
-      this.pointsCache = { xArr, yArr, length: rowCount };
-      this.spatialIndex.build(xArr, yArr, rowCount);
+      // 座標と点 ID は固定なので、描画属性だけの更新では座標キャッシュと四分木を再利用する。
+      if (!this.spatialIndex.isBuilt()) {
+        this.pointsCache = { xArr, yArr, length: rowCount };
+        this.spatialIndex.build(xArr, yArr, rowCount);
+      }
 
       // サイズ基準 LOD 優先度（[0,1), 0=最大サイズ, rowid 順）。GPU 間引きでサイズの大きい点を優先的に残す。
       const lodPriority = priorityColumn
@@ -622,6 +628,7 @@ export class DataLayer {
    */
   async destroy(): Promise<void> {
     this.spatialIndex.destroy();
+    this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
     if (this.repository) {
       await this.repository.close();
       this.repository = null;

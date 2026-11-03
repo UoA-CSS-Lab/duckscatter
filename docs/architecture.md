@@ -42,7 +42,7 @@ URL の Parquet も全体を取得してから、DuckDB の `parquet_data` テ�
 
 | 変更内容 | 主な更新 |
 | --- | --- |
-| `sizeSql` / `colorSql` | 全点の描画属性・LOD 優先度を SQL で再生成し、空間インデックスと GPU の点バッファも更新 |
+| `sizeSql` / `colorSql` | 全点の描画属性・LOD 優先度と GPU の点バッファを更新。固定の座標と四分木は再利用 |
 | `whereConditions` | 一致する `rowid` のビットマップを SQL で再生成。点本体は再生成しない |
 | `gpuFilterColumns` | 全点の指定数値列を取得し GPU に転送。最大 4 列 |
 | `gpuWhereConditions` | 範囲条件とフェード設定を更新。数値列の再取得は不要 |
