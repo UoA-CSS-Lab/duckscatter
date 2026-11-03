@@ -24,9 +24,9 @@ struct FilterUniforms {
   filterRangeMin: vec4<f32>,
   filterRangeMax: vec4<f32>,
   filteredDisplayMode: u32, // computeUint32View[16]
-  useSizePriority: u32,     // computeUint32View[17]（gpu-layer updateUniforms と byte 一致が必須）
-  keepFraction: f32,        // computeFloatView[18]
-  _pad3: u32,               // [19]（FilterUniforms 合計 80 byte = COMPUTE_UNIFORM_SIZE）
+  useSizeCutoff: u32,      // computeUint32View[17]（CPU と byte 位置を揃える）
+  sizeCutoff: f32,         // computeFloatView[18]（これより大きいサイズは全て残す）
+  tieHashThreshold: u32,   // computeUint32View[19]（同サイズだけハッシュで間引く。合計 80 byte）
 }
 
 @group(0) @binding(0) var<storage, read> allPoints: array<Point>;
@@ -37,7 +37,6 @@ struct FilterUniforms {
 @group(0) @binding(5) var<storage, read> visibilityFlags: array<u32>;
 @group(0) @binding(6) var<storage, read_write> filteredIndices: array<u32>;
 @group(0) @binding(7) var<storage, read_write> filteredCounter: atomic<u32>;
-@group(0) @binding(8) var<storage, read> lodPriority: array<f32>;
 
 var<workgroup> localCount: atomic<u32>;
 var<workgroup> localIndices: array<u32, 256>;
@@ -83,15 +82,16 @@ fn main(
   if (idx < uniforms.totalPoints) {
     let passesWhere = isVisibleByWhereFilter(idx);
 
-    // LODチェック（全ポイント共通）。サイズ基準 priority があればサイズの大きい点を優先的に残し、
-    // 無ければ従来の PCG ハッシュによる確率的 dropout にフォールバックする。
+    // 俯瞰のサイズ境界より大きい点は全て残し、同サイズだけ固定ハッシュで間引く。
+    // 均一サイズやズームインではサイズを読む前に従来のハッシュで間引ける。
     var passesLOD = true;
-    if (uniforms.useSizePriority != 0u) {
-      // lodPriority[idx] は [0,1)（0=最大サイズ）。keepFraction 以下なら残す＝大きい順に残る。
-      passesLOD = lodPriority[idx] <= uniforms.keepFraction;
+    if (uniforms.useSizeCutoff != 0u) {
+      let size = allPoints[idx].size;
+      passesLOD = size > uniforms.sizeCutoff ||
+        (size == uniforms.sizeCutoff && pcgHash(idx) <= uniforms.tieHashThreshold);
     } else {
       let hash = pcgHash(idx);
-      passesLOD = hash <= uniforms.lodThreshold;
+      passesLOD = uniforms.lodThreshold > 0u && hash <= uniforms.lodThreshold;
     }
 
     // ビューポート境界チェック（全ポイント共通）

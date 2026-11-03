@@ -9,8 +9,8 @@
 
 この文書は採用済み ADR ではなく、提案時点の設計とレビュー記録を保存したもの。以下はコミット `6e55edd`（package version `1.22.0`）との照合結果であり、実装着手前に提案を見直す必要がある。現行の説明は [現行アーキテクチャ](architecture.md) を参照。
 
-- 現行 LOD は、俯瞰ではサイズ順位、ズームインでは PCG ハッシュを使う。本文の PCG のみを前提とした比較や `1.11.0` との互換性の記述を、現在の契約として扱わない。
-- compute の storage binding `8` は現在 `lodPriority` が使用している。uniform の slot `17` と `18` も `useSizePriority` と `keepFraction` が使用しており、本文の空き領域の想定は古い。
+- 現行 LOD は、俯瞰ではサイズ分布から求めた境界と同サイズ用の PCG ハッシュ、ズームインでは PCG ハッシュを使う。本文の PCG のみを前提とした比較や `1.11.0` との互換性の記述を、現在の契約として扱わない。
+- サイズ境界方式への変更は現在の作業ツリーを反映している。`lodPriority` 用の storage binding `8` は削除済みだが、uniform の slot `17`・`18`・`19` は `useSizeCutoff`・`sizeCutoff`・`tieHashThreshold` が使用している。本文の空き領域の想定は古い。
 - 選択点・ホバー強調点・フィルター一致点を LOD から除外する foreground 規則は未実装。
 - 今回の設計レビューでは、選択・ホバー強調による点本体の強制描画を採らず、通常の LOD・フィルター判定に従う方針を確認した（[ADR-0003](adr/0003-selection-independent-of-drawing.md)）。本文の foreground 案を再検討する場合は、この判断との差を扱う必要がある。
 - 現在の `visiblePointLimit` の既定値は `5_000_000`。読み込み点数の上限や、厳密な描画点数の上限ではない。

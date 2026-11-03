@@ -6,6 +6,7 @@ import { createError } from '../errors.js';
 import type { AllPointsData } from '../renderer/gpu-layer.js';
 import { SpatialPointIndex } from './spatial-index.js';
 import { PointPacker, type PointCoordinates } from './point-packing.js';
+import { createLodSizeDistribution, type LodSizeDistribution } from './lod.js';
 import { GPU_FILTER_COLUMN_COMPONENTS, MAX_GPU_FILTER_COLUMNS } from '../constants.js';
 
 /**
@@ -91,6 +92,13 @@ export class DataLayer {
   private spatialIndex = new SpatialPointIndex();
   /** GPU 用の巡回置換と、チャンクサイズごとの順序表 */
   private readonly pointPacker = new PointPacker();
+  /** 色だけの変更では再集計しない、サイズ別の累積件数。無効な分布も再取得まで保持する。 */
+  private sizeDistributionCache: {
+    totalCount: number;
+    distribution: LodSizeDistribution | undefined;
+  } | null = null;
+  /** 読み込み中の設定変更で、古い分布をキャッシュへ戻さないための世代。 */
+  private sizeDistributionRevision = 0;
 
   /**
    * DataLayerインスタンスを作成する
@@ -161,9 +169,11 @@ export class DataLayer {
   ): Promise<AllPointsData> {
     // 構築時に保留した設定警告を、リスナーが登録済みのこの時点で発行する
     this.flushPendingConfigWarning();
-    // 入力が変わる場合は、同じ件数でも以前の座標と四分木を再利用しない。
+    // 別の入力で初期化し直す場合は、同じ件数でも以前の座標と四分木を再利用しない。
     this.spatialIndex.destroy();
     this.pointPacker.clear();
+    this.sizeDistributionCache = null;
+    this.sizeDistributionRevision++;
     this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
     this.repository = await createParquetReader();
     if (typeof source === 'string') {
@@ -220,12 +230,13 @@ export class DataLayer {
    */
   async loadAllPoints(): Promise<AllPointsData> {
     try {
+      // 非同期のクエリ待ちの間に設定が変わっても、点本体と分布には同じサイズ式を使う。
+      const sizeSql = this.sizeSql;
+      const sizeDistributionRevision = this.sizeDistributionRevision;
+      let sizeDistributionCache = this.sizeDistributionCache;
       const data = await this.repository!.query({
         toString: () =>
-          `SELECT x, y, (${this.sizeSql}) AS __size__, (${this.colorSql}) AS __color__, ` +
-          // サイズ基準 LOD 優先度 [0,1)（0=最大サイズ）。サイズ降順＋rowid を tiebreaker にランク付けして正規化。
-          // 均一サイズ（sizeSql=定数）なら tiebreaker の rowid 順＝ID 順になる。
-          `CAST((CAST(ROW_NUMBER() OVER (ORDER BY (${this.sizeSql}) DESC, rowid ASC) AS DOUBLE) - 1.0) / GREATEST(CAST(COUNT(*) OVER () AS DOUBLE), 1.0) AS FLOAT) AS __priority__ ` +
+          `SELECT x, y, (${sizeSql}) AS __size__, (${this.colorSql}) AS __color__ ` +
           `FROM parquet_data ORDER BY rowid`,
       });
       if (!data) {
@@ -235,11 +246,25 @@ export class DataLayer {
         };
       }
 
-      // 元の Arrow 領域を並べ替える前に、別列の LOD 優先度を独立した配列に保持する。
-      const priorityColumn = data.columnData.get('__priority__');
-      const lodPriority = priorityColumn
-        ? new Float32Array(priorityColumn.toArray() as ArrayLike<number>)
-        : undefined;
+      if (!sizeDistributionCache || sizeDistributionCache.totalCount !== data.rowCount) {
+        // 点ごとの順位は作らず、異なるサイズの件数だけを集計する。
+        // 分布は描画と同じ全点集合に対するもので、SQL・GPU フィルターでは変更しない。
+        const distributionData = await this.repository!.query({
+          toString: () =>
+            `WITH __sizes AS (SELECT (${sizeSql}) AS __size__ FROM parquet_data) ` +
+            `SELECT __size__, COUNT(*) AS __count__ FROM __sizes ` +
+            `GROUP BY __size__ ORDER BY __size__ DESC`,
+        });
+        sizeDistributionCache = {
+          totalCount: data.rowCount,
+          distribution: createLodSizeDistribution(distributionData, data.rowCount),
+        };
+        if (sizeDistributionRevision === this.sizeDistributionRevision) {
+          this.sizeDistributionCache = sizeDistributionCache;
+        }
+      }
+
+      // 初期化後の座標と点 ID は固定なので、色・サイズの再取得では検索用データを再構築しない。
       const needsSpatialIndex = !this.spatialIndex.isBuilt();
       const packed = this.pointPacker.pack(data, needsSpatialIndex ? undefined : this.pointsCache);
       if (needsSpatialIndex) {
@@ -251,7 +276,7 @@ export class DataLayer {
       return {
         instanceData: packed.instanceData,
         totalCount: data.rowCount,
-        lodPriority,
+        lodSizeDistribution: sizeDistributionCache.distribution,
       };
     } catch (e) {
       if (this.onError) {
@@ -421,8 +446,16 @@ export class DataLayer {
     let needsVisibilityUpdate = false;
     let gpuFilterColumnsChanged = false;
 
+    // 同じ SQL 式がサイズの参照テーブルを使う場合も、明示的な再取得では分布を更新する。
+    if (options.reloadPoints === true) {
+      this.sizeDistributionCache = null;
+      this.sizeDistributionRevision++;
+    }
+
     if (options.sizeSql !== undefined && options.sizeSql !== this.sizeSql) {
       this.sizeSql = options.sizeSql;
+      this.sizeDistributionCache = null;
+      this.sizeDistributionRevision++;
       needsFullReload = true;
     }
     if (options.colorSql !== undefined && options.colorSql !== this.colorSql) {
@@ -605,6 +638,8 @@ export class DataLayer {
   async destroy(): Promise<void> {
     this.spatialIndex.destroy();
     this.pointPacker.clear();
+    this.sizeDistributionCache = null;
+    this.sizeDistributionRevision++;
     this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
     if (this.repository) {
       await this.repository.close();
