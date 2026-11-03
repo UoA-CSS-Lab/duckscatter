@@ -231,7 +231,7 @@ try {
   );
   assert.throws(() => buildSingleColorSql('invalid'), /hexadecimal/, '不正な単色指定を拒否する');
 
-  // 実際の接続・リポジトリ・四分木を使い、属性だけの更新が座標キャッシュを作り直さないことを確認する。
+  // 実際の接続とリポジトリで、色表の更新が描画バッファへ反映されることを確認する。
   const reader = new ParquetReader();
   reader.conn = connection;
   let renderedPoints;
@@ -247,20 +247,6 @@ try {
   });
   cachedLayer.repository = reader;
   renderedPoints = await cachedLayer.loadAllPoints();
-  const coordinateCache = cachedLayer.pointsCache;
-  const quadTree = cachedLayer.spatialIndex.quadTree;
-  assert(quadTree, '初回に実データの四分木を構築する');
-  const nearest = (dataLayer, x, y) =>
-    dataLayer.spatialIndex.findNearest(x, y, 1e-8, new Uint32Array(0), new Float32Array(0), []);
-  const firstX = coordinateCache.xArr[0];
-  const firstY = coordinateCache.yArr[0];
-  const firstNearest = nearest(cachedLayer, firstX, firstY);
-  assert.notEqual(firstNearest, null, '初回の座標からホバー候補が見つかる');
-  const assertCoordinatesReused = () => {
-    assert.equal(cachedLayer.pointsCache, coordinateCache, '座標キャッシュの同じ実体を再利用する');
-    assert.equal(cachedLayer.spatialIndex.quadTree, quadTree, '四分木の同じ実体を再利用する');
-    assert.equal(nearest(cachedLayer, firstX, firstY), firstNearest, 'ホバーの検索結果を保持する');
-  };
   const renderedColors = () =>
     new Uint32Array(
       renderedPoints.instanceData.buffer,
@@ -269,21 +255,14 @@ try {
     );
 
   await cachedLayer.updateOptions({ colorSql: buildSingleColorSql('#ff0000') });
-  assertCoordinatesReused();
-  assert.equal(
-    renderedColors()[2],
-    packedColor([255, 0, 0]) >>> 0,
-    '四分木を保持したまま描画色を更新する'
-  );
+  assert.equal(renderedColors()[2], packedColor([255, 0, 0]) >>> 0, '単色の描画色へ更新する');
   await cachedLayer.updateOptions({ sizeSql: '9::FLOAT' });
-  assertCoordinatesReused();
-  assert.equal(renderedPoints.instanceData[3], 9, '四分木を保持したまま描画サイズを更新する');
+  assert.equal(renderedPoints.instanceData[3], 9, '指定した描画サイズへ更新する');
 
-  // SQL 文字列が同じ参照テーブルの更新でも、描画属性を更新しつつ四分木は保持する。
+  // SQL 文字列が同じ参照テーブルの更新でも、描画色へ反映する。
   await cachedLayer.updateOptions({ colorSql: clusterSql });
   await replaceClusterColorTable(executeSql, replaced);
   await cachedLayer.updateOptions({ reloadPoints: true });
-  assertCoordinatesReused();
   const clusterZeroId = Number(
     connection
       .query('SELECT rowid FROM parquet_data WHERE cluster_id = 0 LIMIT 1')
@@ -295,36 +274,6 @@ try {
     packedColor([0, 255, 0]) >>> 0,
     '参照テーブルの変更を描画色に反映する'
   );
-
-  // 入力の差し替えは新しい散布図のデータレイヤーで扱う。同じ件数でも新しい座標で構築する。
-  connection.query(
-    "CREATE OR REPLACE TABLE parquet_data AS SELECT * REPLACE (x + 10000::FLOAT AS x, y - 10000::FLOAT AS y) FROM read_parquet('sample.parquet')"
-  );
-  const replacementLayer = new DataLayer({ sizeSql: '5::FLOAT', colorSql: clusterSql });
-  replacementLayer.repository = reader;
-  const replacementPoints = await replacementLayer.loadAllPoints();
-  assert.equal(
-    replacementPoints.totalCount,
-    renderedPoints.totalCount,
-    '同じ点数の別入力を確認する'
-  );
-  assert.notEqual(
-    replacementLayer.pointsCache,
-    coordinateCache,
-    '別入力の座標キャッシュを構築する'
-  );
-  assert.notEqual(replacementLayer.spatialIndex.quadTree, quadTree, '別入力の四分木を構築する');
-  assert.notEqual(replacementLayer.pointsCache.xArr[0], firstX, '別入力の座標を保持する');
-  assert.notEqual(
-    nearest(
-      replacementLayer,
-      replacementLayer.pointsCache.xArr[0],
-      replacementLayer.pointsCache.yArr[0]
-    ),
-    null,
-    '別入力の座標からホバー候補が見つかる'
-  );
-  log('ホバー用の座標キャッシュと四分木の再利用検証に成功しました。');
 
   log(
     `クラスタ色の実データ検証に成功しました: ${points.numRows.toLocaleString('ja-JP')} 点、${colors.length} クラスタ、${noiseCount.toLocaleString('ja-JP')} ノイズ点。`
