@@ -77,7 +77,7 @@ export interface GpuLayerOptions {
   canvas: HTMLCanvasElement;
   /** 背景色（デフォルト: 透明な黒） */
   backgroundColor?: Color4f;
-  /** 自動 LOD の目標 GPU 処理時間 (ms、既定 8)。 */
+  /** 自動 LOD の目標 GPU 処理時間 (ms、既定 1000 / 60)。 */
   targetRenderTimeMs?: number;
   /** グローバル透明度 (0.0-1.0, デフォルト: 1.0) */
   pointAlpha?: number;

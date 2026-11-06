@@ -265,7 +265,7 @@ export interface DataOptions {
 }
 
 export interface GpuOptions {
-  /** 自動 LOD の目標 GPU 処理時間 (ms、既定 8)。絞り込みと点描画を含み、CPU ラベル描画は含まない。 */
+  /** 自動 LOD の目標 GPU 処理時間 (ms、既定 1000 / 60)。絞り込みと点描画を含み、CPU ラベル描画は含まない。 */
   targetRenderTimeMs?: number;
   /** 背景色（デフォルト: 透明な黒） */
   backgroundColor?: Color4f;

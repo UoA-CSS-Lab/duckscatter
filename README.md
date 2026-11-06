@@ -107,7 +107,7 @@ duckscatterは、Parquet形式のデータファイルを読み込みます。�
 
 以下は設定項目を示す型の擬似コードです。実行可能な初期化例は「最小の利用例」を参照してください。
 
-点の描画量は `gpu.targetRenderTimeMs`（既定 8 ms）から自動調整します。変更は `plot.update({ gpu: { targetRenderTimeMs: 8 } })` で行います。絞り込みと点描画の GPU 処理時間が対象で、CPU のラベル描画や読み込みは含みません。目標時間の達成や FPS は保証しません。旧 `data.visiblePointLimit` と `DEFAULT_VISIBLE_POINT_LIMIT`、統計の `pointBudget` は廃止し、公開定数は `DEFAULT_TARGET_RENDER_TIME_MS` に置き換えています。
+点の描画量は `gpu.targetRenderTimeMs`（既定 `1000 / 60` ms、約 16.67 ms）から自動調整します。既定値は 60 fps の 1 フレーム分を基準にしています。変更は `plot.update({ gpu: { targetRenderTimeMs: 1000 / 60 } })` で行います。絞り込みと点描画の GPU 処理時間が対象で、CPU のラベル描画や読み込みは含みません。目標時間の達成や FPS は保証しません。旧 `data.visiblePointLimit` と `DEFAULT_VISIBLE_POINT_LIMIT`、統計の `pointBudget` は廃止し、公開定数は `DEFAULT_TARGET_RENDER_TIME_MS` に置き換えています。
 
 ```typescript
 const plot = new ScatterPlot({
@@ -122,7 +122,7 @@ const plot = new ScatterPlot({
     gpuWhereConditions?: GpuWhereCondition[], // GPUフィルター条件
   },
   gpu?: {
-    targetRenderTimeMs?: number,  // 絞り込み＋GPU 描画の目標時間（ms、デフォルト: 8）
+    targetRenderTimeMs?: number,  // 絞り込み＋GPU 描画の目標時間（ms、デフォルト: 1000 / 60）
     backgroundColor?: Color4f,  // 背景色
     pointAlpha?: number,          // グローバル透明度（0.0-1.0、デフォルト: 1.0）
     pointSizeScale?: number,      // グローバルサイズスケール（デフォルト: 1.0）
