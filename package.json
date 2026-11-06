@@ -1,6 +1,6 @@
 {
   "name": "@uoa-css-lab/duckscatter",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A TypeScript library for plotting scatter charts using WebGPU",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
