@@ -51,6 +51,8 @@ export interface LabelLayerOptions {
   onLabelHover?: LabelHoverCallback;
   /** ホバー時のアウトラインオプション */
   hoverOutlineOptions?: HoverOutlineOptions;
+  /** GPU 描画とホバーの半径に共通で適用するポイントサイズ倍率。 */
+  pointSizeScale?: number;
   /** データレイヤー参照 */
   dataLayer?: DataLayer;
 }
@@ -72,6 +74,8 @@ export class LabelLayer {
   private readonly minLabelDistance: number = 40;
   /** ラベルのフォントサイズ（ピクセル） */
   private labelFontSize: number = 12;
+  /** GPU レイヤーで正規化済みのポイントサイズ倍率。 */
+  private pointSizeScale = 1;
   /** ラベルフィルタリング関数 */
   private filterLambda?: LabelFilterLambda;
   /** 非マッチラベルの dim opacity（指定時は元色を保持して減衰、未指定はグレー表示） */
@@ -96,6 +100,7 @@ export class LabelLayer {
     panX: NaN,
     panY: NaN,
     font: NaN,
+    pointSizeScale: NaN,
     cw: -1,
     ch: -1,
     labels: null as Label[] | null,
@@ -166,6 +171,7 @@ export class LabelLayer {
     this.canvas = options.canvas;
     this.minLabelDistance = options.minLabelDistance ?? this.minLabelDistance;
     this.labelFontSize = options.labelFontSize ?? this.labelFontSize;
+    this.pointSizeScale = options.pointSizeScale ?? this.pointSizeScale;
     this.filterLambda = options.filterLambda ?? undefined;
     this.unmatchedLabelOpacity = options.unmatchedLabelOpacity;
     this.mutedLambda = options.mutedLambda;
@@ -243,6 +249,7 @@ export class LabelLayer {
       p.panX === this.panX &&
       p.panY === this.panY &&
       p.font === this.labelFontSize &&
+      p.pointSizeScale === this.pointSizeScale &&
       p.cw === this.labelCanvas.width &&
       p.ch === this.labelCanvas.height &&
       p.labels === this.labels &&
@@ -263,6 +270,7 @@ export class LabelLayer {
     p.panX = this.panX;
     p.panY = this.panY;
     p.font = this.labelFontSize;
+    p.pointSizeScale = this.pointSizeScale;
     p.cw = this.labelCanvas.width;
     p.ch = this.labelCanvas.height;
     p.labels = this.labels;
@@ -521,7 +529,8 @@ export class LabelLayer {
 
     const baseSize = getPointSize(this.hoveredPoint);
     const zoomScaledSize = Math.max(
-      baseSize * Math.pow(this.zoom, 0.3) + (this.hoverOutlineOptions.outlinedPointAddition ?? 3),
+      baseSize * this.pointSizeScale * Math.pow(this.zoom, 0.3) +
+        (this.hoverOutlineOptions.outlinedPointAddition ?? 3),
       this.hoverOutlineOptions.minimumHoverSize ?? 10
     );
 
@@ -602,7 +611,8 @@ export class LabelLayer {
           this.panX,
           this.panY,
           aspectRatio,
-          10
+          10,
+          this.pointSizeScale
         );
       }
 
@@ -822,6 +832,9 @@ export class LabelLayer {
    * @param options 更新するオプション
    */
   updateOptions(options: Partial<LabelLayerOptions>): void {
+    if (options.pointSizeScale !== undefined) {
+      this.pointSizeScale = options.pointSizeScale;
+    }
     if (options.labelFontSize !== undefined) {
       this.labelFontSize = options.labelFontSize;
     }

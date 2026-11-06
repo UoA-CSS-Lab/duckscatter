@@ -172,7 +172,7 @@ class QuadTree {
     queryX: number,
     queryY: number,
     thresholdSq: number,
-    isVisible: (index: number) => boolean
+    isVisible: (index: number, distanceSq: number) => boolean
   ): number | null {
     const result = this.searchNode(this.root, queryX, queryY, thresholdSq, null, isVisible);
     return result.index;
@@ -231,7 +231,7 @@ class QuadTree {
     queryY: number,
     bestDistSq: number,
     bestIndex: number | null,
-    isVisible: (index: number) => boolean
+    isVisible: (index: number, distanceSq: number) => boolean
   ): { index: number | null; distSq: number } {
     // 枝刈り: ノード境界が現在のベスト距離以上なら探索スキップ
     if (distSqToBounds(node.bounds, queryX, queryY) >= bestDistSq) {
@@ -245,11 +245,10 @@ class QuadTree {
       const yArr = this.yArr;
       for (let i = 0; i < indices.length; i++) {
         const idx = indices[i];
-        if (!isVisible(idx)) continue;
         const dx = xArr[idx] - queryX;
         const dy = yArr[idx] - queryY;
         const distSq = dx * dx + dy * dy;
-        if (distSq < bestDistSq) {
+        if (distSq < bestDistSq && isVisible(idx, distSq)) {
           bestDistSq = distSq;
           bestIndex = idx;
         }
@@ -316,6 +315,7 @@ export class SpatialPointIndex {
    * @param visibilityFlags ビジビリティフラグ（WHERE条件用ビットマップ）
    * @param filterColumnData GPUフィルターカラムデータ
    * @param gpuFilterRanges GPUフィルターレンジ配列
+   * @param isHit 点固有の半径などによる追加判定。距離はワールド空間距離²。
    * @returns 最近傍のポイントインデックス、見つからない場合は null
    */
   findNearest(
@@ -324,14 +324,15 @@ export class SpatialPointIndex {
     thresholdSq: number,
     visibilityFlags: Uint32Array,
     filterColumnData: Float32Array,
-    gpuFilterRanges: { columnIndex: number; min: number; max: number }[]
+    gpuFilterRanges: { columnIndex: number; min: number; max: number }[],
+    isHit?: (index: number, distanceSq: number) => boolean
   ): number | null {
     if (!this.quadTree) return null;
 
     const checkVisibility = visibilityFlags.length > 0;
     const checkGpuFilter = filterColumnData.length > 0 && gpuFilterRanges.length > 0;
 
-    const isVisible = (index: number): boolean => {
+    const isVisible = (index: number, distanceSq: number): boolean => {
       if (checkVisibility) {
         if ((visibilityFlags[index >> 5] & (1 << (index & 31))) === 0) return false;
       }
@@ -342,7 +343,7 @@ export class SpatialPointIndex {
           if (v < r.min || v > r.max) return false;
         }
       }
-      return true;
+      return isHit?.(index, distanceSq) ?? true;
     };
 
     return this.quadTree.findNearest(queryX, queryY, thresholdSq, isVisible);
