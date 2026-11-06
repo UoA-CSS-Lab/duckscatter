@@ -97,6 +97,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
       onPointHover: options.interaction?.onPointHover,
       onLabelHover: options.interaction?.onLabelHover,
       hoverOutlineOptions: options.labels?.hoverOutlineOptions,
+      pointSizeScale: this.gpuLayer.getPointSizeScale(),
       mutedLambda: options.labels?.mutedLambda,
       mutedLabelColor: options.labels?.mutedLabelColor,
       mutedLabelOpacity: options.labels?.mutedLabelOpacity,
@@ -441,6 +442,11 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
         selectionStyle: options.gpu?.selection,
         recededClamp: options.gpu?.recededClamp,
       });
+      if (options.gpu.pointSizeScale !== undefined) {
+        // 直接の setter と update() の両方で、GPU とホバーの倍率を揃える。
+        this.labelLayer.updateOptions({ pointSizeScale: this.gpuLayer.getPointSizeScale() });
+        updatePaths.add('label-layer');
+      }
       updatePaths.add('gpu-render-uniforms');
     }
 
@@ -852,6 +858,7 @@ export class ScatterPlot extends EventEmitter<ScatterPlotEventMap> {
    */
   setPointSizeScale(scale: number): void {
     this.gpuLayer.setPointSizeScale(scale);
+    this.labelLayer.updateOptions({ pointSizeScale: this.gpuLayer.getPointSizeScale() });
     this.render();
   }
 

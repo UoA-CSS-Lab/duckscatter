@@ -87,6 +87,10 @@ export class DataLayer {
     yArr: new Float64Array(0),
     length: 0,
   };
+  /** GPU に渡したサイズを点 ID 順に保持し、ホバーも同じ半径で判定する。 */
+  private pointSizes = new Float32Array(0);
+  /** 大きな点の外周を探索範囲から落とさないための最大半径。 */
+  private maxPointSize = 0;
 
   /** WhereConditionから生成されたビジビリティフラグのキャッシュ（WHERE条件なし時は空） */
   private visibilityFlags: Uint32Array = new Uint32Array(0);
@@ -181,6 +185,8 @@ export class DataLayer {
     this.sizeDistributionCache = null;
     this.sizeDistributionRevision++;
     this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
+    this.pointSizes = new Float32Array(0);
+    this.maxPointSize = 0;
     this.repository = await createParquetReader();
     if (typeof source === 'string') {
       await this.repository.loadParquetFromUrl(source);
@@ -273,6 +279,16 @@ export class DataLayer {
       // 初期化後の座標と点 ID は固定なので、色・サイズの再取得では検索用データを再構築しない。
       const needsSpatialIndex = !this.spatialIndex.isBuilt();
       const packed = this.pointPacker.pack(data, needsSpatialIndex ? undefined : this.pointsCache);
+      if (this.pointSizes.length !== data.rowCount) {
+        this.pointSizes = new Float32Array(data.rowCount);
+      }
+      this.maxPointSize = 0;
+      for (let index = 0; index < data.rowCount; index++) {
+        // 詰め替え後の f32 を使い、元の SQL 列と GPU の丸めの違いを持ち込まない。
+        const size = Math.abs(packed.instanceData[index * 4 + 3]);
+        this.pointSizes[index] = Number.isFinite(size) ? size : 0;
+        this.maxPointSize = Math.max(this.maxPointSize, this.pointSizes[index]);
+      }
       if (needsSpatialIndex) {
         this.pointsCache = packed.coordinates;
         const { xArr, yArr, length } = packed.coordinates;
@@ -545,7 +561,8 @@ export class DataLayer {
    * @param panX 現在のパンX
    * @param panY 現在のパンY
    * @param aspectRatio キャンバスのアスペクト比
-   * @param thresholdPixels ヒットと見なす最大距離（ピクセル、デフォルト: 10）
+   * @param thresholdPixels 小さい点にも確保する最小の判定半径（ピクセル、デフォルト: 10）
+   * @param pointSizeScale GPU 描画と同じポイントサイズ倍率（デフォルト: 1）
    * @returns 見つかった場合はポイントデータ、そうでない場合はnull
    */
   /**
@@ -563,7 +580,8 @@ export class DataLayer {
     panX: number,
     panY: number,
     aspectRatio: number,
-    thresholdPixels: number = 10
+    thresholdPixels: number = 10,
+    pointSizeScale: number = 1
   ): number | null {
     if (!this.spatialIndex.isBuilt()) {
       return null;
@@ -575,8 +593,11 @@ export class DataLayer {
     const worldX = ((clipX - panX) * aspectRatio) / zoom;
     const worldY = (clipY - panY) / zoom;
 
-    const thresholdClip = (thresholdPixels / canvasWidth) * 2;
-    const thresholdWorld = (thresholdClip * aspectRatio) / zoom;
+    const pixelToWorld = (2 * aspectRatio) / (canvasWidth * zoom);
+    const minimumRadius = thresholdPixels * pixelToWorld;
+    // GPU の点半径と同じサイズ倍率・ズーム補正を使う。小さい点には従来の余白を残す。
+    const sizeToWorld = pointSizeScale * Math.pow(zoom, 0.3) * pixelToWorld;
+    const thresholdWorld = Math.max(minimumRadius, this.maxPointSize * sizeToWorld);
     const thresholdWorldSq = thresholdWorld * thresholdWorld;
 
     return (
@@ -586,7 +607,12 @@ export class DataLayer {
         thresholdWorldSq,
         this.visibilityFlags,
         this.filterColumnData,
-        this.gpuFilterRanges
+        this.gpuFilterRanges,
+        (index, distanceSq) => {
+          // 最大サイズは枝の探索範囲にだけ使い、各候補は自分の半径で判定する。
+          const radius = Math.max(minimumRadius, this.pointSizes[index] * sizeToWorld);
+          return distanceSq < radius * radius;
+        }
       ) ?? null
     );
   }
@@ -600,7 +626,8 @@ export class DataLayer {
     panX: number,
     panY: number,
     aspectRatio: number,
-    thresholdPixels: number = 10
+    thresholdPixels: number = 10,
+    pointSizeScale: number = 1
   ): Promise<Record<string, any> | null> {
     const nearestRowid = this.findNearestPointId(
       screenX,
@@ -611,7 +638,8 @@ export class DataLayer {
       panX,
       panY,
       aspectRatio,
-      thresholdPixels
+      thresholdPixels,
+      pointSizeScale
     );
     if (nearestRowid == null) {
       return null;
@@ -677,6 +705,8 @@ export class DataLayer {
     this.sizeDistributionCache = null;
     this.sizeDistributionRevision++;
     this.pointsCache = { xArr: new Float64Array(0), yArr: new Float64Array(0), length: 0 };
+    this.pointSizes = new Float32Array(0);
+    this.maxPointSize = 0;
     if (this.repository) {
       await this.repository.close();
       this.repository = null;
