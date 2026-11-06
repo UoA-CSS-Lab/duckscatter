@@ -5,7 +5,8 @@ const KEEP_RATIOS = [
   0.0001, 0.00015, 0.0002, 0.0003, 0.0004, 0.0006, 0.0008, 0.001, 0.0015, 0.002, 0.003, 0.004,
   0.006, 0.008, 0.01, 0.015, 0.02, 0.03, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8, 1,
 ] as const;
-const INITIAL_LEVEL = KEEP_RATIOS.indexOf(0.1);
+// 計測前から点を落とさず、実際に時間超過が確認できた場合だけ間引く。
+const INITIAL_LEVEL = KEEP_RATIOS.length - 1;
 const UPDATE_INTERVAL_MS = 500;
 
 /** 移動のたびに停止期限を延ばし、パン・ズーム中の点集合の切り替えを抑える。 */
@@ -70,7 +71,7 @@ export class AdaptiveLodController {
     if (!preserveUpdateInterval) this.nextUpdateAt = -Infinity;
   }
 
-  /** 別のデータを初期表示するときは、控えめな保持率から計測を始める。 */
+  /** 別のデータを初期表示するときも、全点を保持して計測を始める。 */
   reset(): void {
     this.level = INITIAL_LEVEL;
     this.invalidateMeasurements();
